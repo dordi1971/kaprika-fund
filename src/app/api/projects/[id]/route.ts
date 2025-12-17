@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { deleteDraftProject, getProject, updateProject } from "@/lib/creator/store";
 import { requireSessionAddress } from "@/lib/creator/auth";
+import { ExternalLinksDraftSchema } from "@/lib/creator/schemas";
 import type { ProjectRecord } from "@/lib/creator/types";
 
 type PatchBody = {
   ifMatchVersion?: number;
   core?: Partial<ProjectRecord["core"]>;
   funding?: Partial<ProjectRecord["funding"]>;
+  externalLinks?: ProjectRecord["externalLinks"];
 };
 
 export async function GET(_: Request, context: { params: Promise<{ id: string }> }) {
@@ -43,10 +45,23 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   const body = (await request.json().catch(() => null)) as PatchBody | null;
   if (!body) return NextResponse.json({ error: "INVALID_JSON" }, { status: 400 });
 
+  let externalLinks: ProjectRecord["externalLinks"] | undefined;
+  if (body.externalLinks) {
+    const parsed = ExternalLinksDraftSchema.safeParse(body.externalLinks);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "INVALID_EXTERNAL_LINKS" }, { status: 400 });
+    }
+    externalLinks = parsed.data.map((l) => ({
+      ...l,
+      label: l.label.trim(),
+      url: l.url.trim(),
+    }));
+  }
+
   const result = updateProject(
     id,
     session.address,
-    { core: body.core ?? {}, funding: body.funding ?? {} },
+    { core: body.core ?? {}, funding: body.funding ?? {}, ...(externalLinks ? { externalLinks } : {}) },
     body.ifMatchVersion,
   );
 

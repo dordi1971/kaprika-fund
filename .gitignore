@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# creator server-side data (draft persistence + event logs + manifests)
+/data/creator/

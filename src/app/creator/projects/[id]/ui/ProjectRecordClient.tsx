@@ -125,6 +125,11 @@ export default function ProjectRecordClient({ id }: Props) {
             <Link className="ghostBtn" href="/creator">
               Back to console
             </Link>
+            {project.funding.contractAddress ? (
+              <Link className="ghostBtn" href={`/onchain/${encodeURIComponent(project.funding.contractAddress)}`}>
+                Open on-chain view
+              </Link>
+            ) : null}
             {project.status === "DRAFT" ? (
               <Link className="neutralBtn" href={`/creator/drafts/${encodeURIComponent(project.id)}`}>
                 Edit

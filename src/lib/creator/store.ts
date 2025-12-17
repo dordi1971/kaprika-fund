@@ -1,7 +1,15 @@
 import crypto from "node:crypto";
 import type { ProjectEvent, ProjectEventType, ProjectRecord, ProjectStatus } from "./types";
+import {
+  appendEventToDisk,
+  deleteProjectFromDisk,
+  hydrateProjectsFromDisk,
+  readEventsFromDisk,
+  writeProjectToDisk,
+} from "./persist";
 
 type CreatorStore = {
+  hydratedFromDisk: boolean;
   nonces: Map<string, string>;
   sessions: Map<string, { address: string; createdAt: string }>;
   projects: Map<string, ProjectRecord>;
@@ -24,12 +32,20 @@ function normalizeAddress(address: string) {
 export function getCreatorStore(): CreatorStore {
   if (!globalThis.__observerSystemCreatorStore) {
     globalThis.__observerSystemCreatorStore = {
+      hydratedFromDisk: false,
       nonces: new Map(),
       sessions: new Map(),
       projects: new Map(),
       eventsByProjectId: new Map(),
     };
   }
+
+  // One-time hydration (so drafts survive server restarts)
+  if (!globalThis.__observerSystemCreatorStore.hydratedFromDisk) {
+    hydrateProjectsFromDisk(globalThis.__observerSystemCreatorStore.projects);
+    globalThis.__observerSystemCreatorStore.hydratedFromDisk = true;
+  }
+
   return globalThis.__observerSystemCreatorStore;
 }
 
@@ -77,16 +93,28 @@ export function createDraftProject(creatorAddress: string): ProjectRecord {
       title: null,
       category: null,
       definition: null,
+      deliverableExample: null,
       explanation: null,
     },
+    externalLinks: [],
     funding: {
       currency: "USDC",
+      tokenAddress: null,
+      tokenDecimals: 6,
       target: null,
       minimumAllocation: null,
       deadline: null,
       releaseModel: "MILESTONE",
       raised: null,
+      projectURI: null,
+      stampURI: null,
       contractAddress: null,
+      chainId: null,
+      onchainProjectId: null,
+      openedTxHash: null,
+      acceptedToken: null,
+      voteDurationDays: 10,
+      quorumBps: 1500,
     },
     commitments: [],
     createdAt: timestamp,
@@ -96,6 +124,10 @@ export function createDraftProject(creatorAddress: string): ProjectRecord {
     version: 1,
   };
   store.projects.set(id, record);
+
+  // Persist before emitting the event (so disk always has a project file for event readers)
+  writeProjectToDisk(record);
+
   appendEvent(id, "CREATED", record.creatorAddress);
   return record;
 }
@@ -142,6 +174,9 @@ export function updateProject(
     version: existing.version + 1,
   };
   store.projects.set(projectId, next);
+
+  writeProjectToDisk(next);
+
   appendEvent(projectId, "EDITED", normalizeAddress(actorAddress));
   return { ok: true as const, status: 200 as const, project: next };
 }
@@ -172,19 +207,25 @@ export function updateCommitments(
     version: existing.version + 1,
   };
   store.projects.set(projectId, next);
+
+  writeProjectToDisk(next);
+
   appendEvent(projectId, "COMMITMENTS_UPDATED", normalizeAddress(actorAddress));
   return { ok: true as const, status: 200 as const, project: next };
 }
 
-export function deleteDraftProject(projectId: string, actorAddress: string) {
+export function deleteDraftProject(projectId: string, _: string) {
   const store = getCreatorStore();
   const existing = store.projects.get(projectId);
   if (!existing) return { ok: false as const, status: 404 as const };
   if (existing.status !== "DRAFT") return { ok: false as const, status: 403 as const };
+
   store.projects.delete(projectId);
-  appendEvent(projectId, "STATUS_CHANGED", normalizeAddress(actorAddress), {
-    status: "DELETED",
-  });
+
+  // Hard delete: remove disk files as well.
+  // (If you want soft-delete later, set status="DELETED" and keep the project file instead.)
+  deleteProjectFromDisk(projectId);
+
   return { ok: true as const, status: 204 as const };
 }
 
@@ -207,6 +248,9 @@ export function setProjectStatus(
     version: existing.version + 1,
   };
   store.projects.set(projectId, next);
+
+  writeProjectToDisk(next);
+
   appendEvent(projectId, "STATUS_CHANGED", normalizeAddress(actorAddress), { status });
   return { ok: true as const, status: 200 as const, project: next };
 }
@@ -226,13 +270,24 @@ export function appendEvent(
     actorAddress: normalizeAddress(actorAddress),
     payload,
   };
+
   const list = store.eventsByProjectId.get(projectId) ?? [];
   list.push(event);
   store.eventsByProjectId.set(projectId, list);
+
+  // Persist append-only events (cache stays in memory)
+  appendEventToDisk(event);
+
   return event;
 }
 
 export function listEvents(projectId: string) {
   const store = getCreatorStore();
-  return store.eventsByProjectId.get(projectId) ?? [];
+  const cached = store.eventsByProjectId.get(projectId);
+  if (cached) return cached;
+
+  const fromDisk = readEventsFromDisk(projectId);
+  store.eventsByProjectId.set(projectId, fromDisk);
+  return fromDisk;
 }
+

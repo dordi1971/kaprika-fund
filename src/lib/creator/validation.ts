@@ -1,24 +1,59 @@
 import type { ProjectRecord } from "./types";
+import { PROJECT_CATEGORIES, hasConditionals, hasLink, isLikelyISODate } from "@/lib/commitments";
 
 export type PublishValidationError =
   | "MISSING_TITLE"
   | "MISSING_CATEGORY"
   | "DEFINITION_EMPTY"
   | "DEFINITION_TOO_LONG"
+  | "DEFINITION_HAS_LINKS"
+  | "OTHER_DEFINITION_TOO_LONG"
+  | "OTHER_DELIVERABLE_EXAMPLE_REQUIRED"
+  | "OTHER_DELIVERABLE_EXAMPLE_INVALID"
   | "FUNDING_INCOMPLETE"
   | "MISSING_COMMITMENTS"
-  | "COMMITMENTS_INCOMPLETE"
-  | "DEADLINE_INVALID";
+  | "COMMITMENTS_TOO_MANY"
+  | "COMMITMENTS_INVALID"
+  | "COMMITMENTS_DEADLINE_INVALID"
+  | "COMMITMENTS_HAVE_CONDITIONALS"
+  | "COMMITMENTS_DETAILS_HAS_LINKS"
+  | "COMMITMENTS_REFUND_INVALID"
+  | "DEADLINE_INVALID"
+  | "MISSING_PROJECT_URI"
+  | "MISSING_TOKEN_ADDRESS"
+  | "TOKEN_DECIMALS_INVALID";
 
 export function validateOpenFunding(project: ProjectRecord) {
   const errors: PublishValidationError[] = [];
+  const pushOnce = (code: PublishValidationError) => {
+    if (!errors.includes(code)) errors.push(code);
+  };
 
   if (!project.core.title?.trim()) errors.push("MISSING_TITLE");
-  if (!project.core.category?.trim()) errors.push("MISSING_CATEGORY");
+
+  const allowedCategories = new Set(PROJECT_CATEGORIES.map((c) => c.value));
+  const category = project.core.category;
+  if (!category?.trim() || !allowedCategories.has(category)) {
+    errors.push("MISSING_CATEGORY");
+  }
 
   const definition = project.core.definition?.trim() ?? "";
   if (!definition) errors.push("DEFINITION_EMPTY");
-  if (definition.length > 400) errors.push("DEFINITION_TOO_LONG");
+  if (hasLink(definition)) errors.push("DEFINITION_HAS_LINKS");
+
+  if (category === "OTHER") {
+    if (definition.length > 200) errors.push("OTHER_DEFINITION_TOO_LONG");
+
+    const example = project.core.deliverableExample?.trim() ?? "";
+    if (!example) {
+      errors.push("OTHER_DELIVERABLE_EXAMPLE_REQUIRED");
+    } else {
+      if (example.length > 150) errors.push("OTHER_DELIVERABLE_EXAMPLE_INVALID");
+      if (hasLink(example) || hasConditionals(example)) errors.push("OTHER_DELIVERABLE_EXAMPLE_INVALID");
+    }
+  } else {
+    if (definition.length > 400) errors.push("DEFINITION_TOO_LONG");
+  }
 
   const funding = project.funding;
   if (
@@ -32,23 +67,81 @@ export function validateOpenFunding(project: ProjectRecord) {
   }
 
   if (!project.commitments.length) errors.push("MISSING_COMMITMENTS");
+  if (project.commitments.length > 5) errors.push("COMMITMENTS_TOO_MANY");
+
   if (project.commitments.length) {
-    const hasIncomplete = project.commitments.some((c) => {
-      return (
-        !c.deliverable.trim() ||
-        !c.deadline.trim() ||
-        !c.verification.trim() ||
-        !c.failureConsequence.trim()
-      );
-    });
-    if (hasIncomplete) errors.push("COMMITMENTS_INCOMPLETE");
+    for (const c of project.commitments) {
+      if (
+        !c.deliverableType ||
+        !c.deadline?.trim() ||
+        !c.verificationMethod ||
+        !c.verificationDetails?.trim() ||
+        !c.failureConsequence ||
+        !c.details?.trim()
+      ) {
+        pushOnce("COMMITMENTS_INVALID");
+      }
+
+      if (c.verificationDetails?.trim()) {
+        if (c.verificationDetails.trim().length > 150) pushOnce("COMMITMENTS_INVALID");
+        if (hasConditionals(c.verificationDetails)) pushOnce("COMMITMENTS_HAVE_CONDITIONALS");
+      }
+
+      if (c.details?.trim()) {
+        const details = c.details.trim();
+        if (details.length > 150) pushOnce("COMMITMENTS_INVALID");
+        if (hasConditionals(details)) pushOnce("COMMITMENTS_HAVE_CONDITIONALS");
+        if (hasLink(details)) pushOnce("COMMITMENTS_DETAILS_HAS_LINKS");
+      }
+
+      if (c.deadline?.trim() && !isLikelyISODate(c.deadline.trim())) {
+        pushOnce("COMMITMENTS_DEADLINE_INVALID");
+      }
+
+      if (c.failureConsequence === "PARTIAL_REFUND") {
+        const pct = c.refundPercent;
+        if (!Number.isInteger(pct) || (pct as number) < 1 || (pct as number) > 100) {
+          pushOnce("COMMITMENTS_REFUND_INVALID");
+        }
+      }
+
+      if (c.failureConsequence === "DEADLINE_EXTENSION_VOTE" && c.voteDurationDays != null) {
+        const days = c.voteDurationDays;
+        if (!Number.isInteger(days) || (days as number) < 1 || (days as number) > 14) {
+          pushOnce("COMMITMENTS_INVALID");
+        }
+      }
+    }
   }
 
   if (funding.deadline) {
-    const date = new Date(funding.deadline);
-    if (Number.isNaN(date.valueOf())) errors.push("DEADLINE_INVALID");
+    if (!isLikelyISODate(funding.deadline)) errors.push("DEADLINE_INVALID");
+  }
+
+  // --- On-chain minimums (we need these to be able to deploy the project clone).
+  const projectURI = (funding.projectURI ?? "").trim();
+  if (!projectURI) {
+    errors.push("MISSING_PROJECT_URI");
+  } else {
+    // keep it loose: ipfs://... is preferred, but we don't hard-fail other schemes for MVP
+    if (projectURI.length < 8) errors.push("MISSING_PROJECT_URI");
+  }
+
+  const currency = (funding.currency ?? "").trim().toUpperCase();
+  const tokenAddr = (funding.tokenAddress ?? "").trim();
+  const looksLikeAddress = (v: string) => /^0x[a-fA-F0-9]{40}$/.test(v);
+
+  // If the currency isn't USDC, require an explicit ERC-20 token address.
+  if (currency && currency !== "USDC") {
+    if (!tokenAddr || !looksLikeAddress(tokenAddr)) errors.push("MISSING_TOKEN_ADDRESS");
+    const dec = funding.tokenDecimals;
+    if (!Number.isInteger(dec) || (dec as number) < 0 || (dec as number) > 30) {
+      errors.push("TOKEN_DECIMALS_INVALID");
+    }
+  } else {
+    // For USDC we'll allow tokenAddress to be empty (app can inject a default from env).
+    if (tokenAddr && !looksLikeAddress(tokenAddr)) errors.push("MISSING_TOKEN_ADDRESS");
   }
 
   return { ok: errors.length === 0, errors };
 }
-
