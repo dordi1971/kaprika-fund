@@ -99,13 +99,20 @@ export function createDraftProject(creatorAddress: string): ProjectRecord {
     externalLinks: [],
     funding: {
       currency: "USDC",
-      tokenAddress: null,
+      tokenAddress: (process.env.NEXT_PUBLIC_KAPRIKA_USDC_ADDRESS as string | undefined) ?? null,
       tokenDecimals: 6,
       target: null,
       minimumAllocation: null,
       deadline: null,
       releaseModel: "MILESTONE",
       raised: null,
+      milestonePlan: {
+        initialPercent: 20,
+        milestones: [
+          { name: "Milestone 1", percent: 40 },
+          { name: "Milestone 2", percent: 40 },
+        ],
+      },
       projectURI: null,
       stampURI: null,
       contractAddress: null,
@@ -134,6 +141,17 @@ export function createDraftProject(creatorAddress: string): ProjectRecord {
 
 export function getProject(id: string) {
   const store = getCreatorStore();
+  const cached = store.projects.get(id);
+  if (cached) return cached;
+
+  // Dev + hot-reload safety: if the project exists on disk but wasn't in memory yet,
+  // refresh from disk on-demand to avoid spurious NOT_FOUND responses.
+  try {
+    hydrateProjectsFromDisk(store.projects);
+  } catch {
+    // ignore
+  }
+
   return store.projects.get(id) ?? null;
 }
 
@@ -290,4 +308,3 @@ export function listEvents(projectId: string) {
   store.eventsByProjectId.set(projectId, fromDisk);
   return fromDisk;
 }
-

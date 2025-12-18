@@ -7,7 +7,13 @@ export type ProjectStatus = "DRAFT" | "ACTIVE" | "COMPLETED" | "FAILED";
  * Keeping this as `string` lets you use labels like "USDC", "KPFT", etc.
  */
 export type FundingCurrency = string;
-export type ReleaseModel = "MILESTONE" | "LINEAR" | "MANUAL";
+/**
+ * How raised funds are unlocked for the creator.
+ *
+ * - ALL_OR_NOTHING: one tranche (100%) after a successful raise.
+ * - MILESTONE: multiple tranches (e.g. 20% now + the rest per milestone).
+ */
+export type ReleaseModel = "ALL_OR_NOTHING" | "MILESTONE";
 
 import type { Commitment, ProjectCategory } from "@/lib/commitments";
 
@@ -24,6 +30,17 @@ export type ProjectFunding = {
   deadline: string | null;
   releaseModel: ReleaseModel | null;
   raised: string | null;
+
+  /** Milestone release schedule config (UI-level draft data). */
+  milestonePlan: {
+    /** Percent unlocked immediately after successful raise (default 20). */
+    initialPercent: number;
+    /** Each milestone corresponds to one tranche and one required commitment. */
+    milestones: Array<{
+      name: string;
+      percent: number;
+    }>;
+  } | null;
 
   /** Immutable URIs written into the on-chain project contract. */
   projectURI: string | null;

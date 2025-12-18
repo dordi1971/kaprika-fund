@@ -9,9 +9,9 @@ import { isHexAddress } from "@/lib/contracts/helpers";
 
 type Props = { address: string };
 
-function humanState(s: bigint | undefined) {
+function humanState(s: bigint | number | undefined) {
   // enum State { FUNDING, ACTIVE, FAILED, COMPLETED }
-  switch (Number(s ?? -1n)) {
+  switch (Number(s ?? -1)) {
     case 0:
       return "FUNDING";
     case 1:

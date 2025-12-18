@@ -126,12 +126,41 @@ function normalizeProjectRecord(parsed: any): ProjectRecord | null {
     externalLinks: Array.isArray(parsed.externalLinks) ? parsed.externalLinks : [],
     funding: {
       currency: typeof funding.currency === "string" ? funding.currency : "USDC",
+      tokenAddress: typeof funding.tokenAddress === "string" ? funding.tokenAddress : null,
+      tokenDecimals: typeof funding.tokenDecimals === "number" ? funding.tokenDecimals : null,
       target: typeof funding.target === "string" ? funding.target : null,
       minimumAllocation: typeof funding.minimumAllocation === "string" ? funding.minimumAllocation : null,
       deadline: typeof funding.deadline === "string" ? funding.deadline : null,
       releaseModel: typeof funding.releaseModel === "string" ? funding.releaseModel : "MILESTONE",
       raised: typeof funding.raised === "string" ? funding.raised : null,
+
+      milestonePlan:
+        funding.milestonePlan && typeof funding.milestonePlan === "object"
+          ? {
+              initialPercent:
+                typeof (funding.milestonePlan as any).initialPercent === "number"
+                  ? (funding.milestonePlan as any).initialPercent
+                  : 20,
+              milestones: Array.isArray((funding.milestonePlan as any).milestones)
+                ? (funding.milestonePlan as any).milestones
+                    .filter((m: any) => m && typeof m === "object")
+                    .map((m: any, idx: number) => ({
+                      name: typeof m.name === "string" && m.name.trim() ? m.name : `Milestone ${idx + 1}`,
+                      percent: typeof m.percent === "number" ? m.percent : 0,
+                    }))
+                : [],
+            }
+          : null,
+
+      projectURI: typeof funding.projectURI === "string" ? funding.projectURI : null,
+      stampURI: typeof funding.stampURI === "string" ? funding.stampURI : null,
       contractAddress: typeof funding.contractAddress === "string" ? funding.contractAddress : null,
+      chainId: typeof funding.chainId === "number" ? funding.chainId : null,
+      onchainProjectId: typeof funding.onchainProjectId === "number" ? funding.onchainProjectId : null,
+      openedTxHash: typeof funding.openedTxHash === "string" ? funding.openedTxHash : null,
+      acceptedToken: typeof funding.acceptedToken === "string" ? funding.acceptedToken : null,
+      voteDurationDays: typeof funding.voteDurationDays === "number" ? funding.voteDurationDays : null,
+      quorumBps: typeof funding.quorumBps === "number" ? funding.quorumBps : null,
     } as ProjectRecord["funding"],
     commitments: Array.isArray(parsed.commitments) ? parsed.commitments : [],
     createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : now,

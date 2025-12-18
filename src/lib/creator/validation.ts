@@ -19,7 +19,7 @@ export type PublishValidationError =
   | "COMMITMENTS_DETAILS_HAS_LINKS"
   | "COMMITMENTS_REFUND_INVALID"
   | "DEADLINE_INVALID"
-  | "MISSING_PROJECT_URI"
+  | "PROJECT_URI_UPLOAD_FAILED"
   | "MISSING_TOKEN_ADDRESS"
   | "TOKEN_DECIMALS_INVALID";
 
@@ -118,14 +118,8 @@ export function validateOpenFunding(project: ProjectRecord) {
     if (!isLikelyISODate(funding.deadline)) errors.push("DEADLINE_INVALID");
   }
 
-  // --- On-chain minimums (we need these to be able to deploy the project clone).
-  const projectURI = (funding.projectURI ?? "").trim();
-  if (!projectURI) {
-    errors.push("MISSING_PROJECT_URI");
-  } else {
-    // keep it loose: ipfs://... is preferred, but we don't hard-fail other schemes for MVP
-    if (projectURI.length < 8) errors.push("MISSING_PROJECT_URI");
-  }
+  // NOTE: projectURI is generated automatically from the draft and pinned to IPFS
+  // at the moment funding is opened (so we don't block the creator with manual CIDs).
 
   const currency = (funding.currency ?? "").trim().toUpperCase();
   const tokenAddr = (funding.tokenAddress ?? "").trim();

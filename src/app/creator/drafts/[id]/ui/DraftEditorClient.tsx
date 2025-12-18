@@ -8,7 +8,7 @@ import { decodeEventLog } from "viem";
 import type { Commitment, ProjectRecord } from "@/lib/creator/types";
 import { validateOpenFunding, type PublishValidationError } from "@/lib/creator/validation";
 import ExternalLinksEditor from "./ExternalLinksEditor";
-import { KaprikaProjectFactoryAbi } from "@/lib/contracts/abis";
+import { ERC20Abi, KaprikaProjectFactoryAbi } from "@/lib/contracts/abis";
 import { DEFAULT_STAMP_URI, DEFAULT_USDC_ADDRESS, KAPRIKA_FACTORY_ADDRESS, POLYGON_CHAIN_ID } from "@/lib/contracts/addresses";
 import {
   ceilDiv,
@@ -47,6 +47,22 @@ const FIELD_ANCHOR: Record<IssueField, string> = {
   commitments: "section-commitments",
 };
 
+const pillFieldStyle: CSSProperties = {
+  width: "100%",
+  background: "transparent",
+  border: "1px solid var(--border)",
+  borderRadius: 999,
+  padding: "10px 12px",
+  color: "var(--text)",
+  fontFamily: "inherit",
+};
+
+const pillFieldDisabledStyle: CSSProperties = {
+  ...pillFieldStyle,
+  color: "var(--muted)",
+  background: "rgba(255,255,255,0.02)",
+};
+
 function formatTime(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.valueOf())) return iso;
@@ -83,6 +99,42 @@ function parseIntOrNull(value: string) {
   const n = Number.parseInt(trimmed, 10);
   if (!Number.isFinite(n)) return null;
   return n;
+}
+
+function clampInt(n: number, min: number, max: number) {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
+function distributePercents(total: number, n: number) {
+  const count = Math.max(0, Math.trunc(n));
+  if (count === 0) return [];
+  const base = Math.floor(total / count);
+  const out = Array.from({ length: count }, () => base);
+  let acc = base * count;
+  // Put the remainder on the last milestone for stability.
+  out[count - 1] += total - acc;
+  return out;
+}
+
+function addDaysToISODate(iso: string, days: number) {
+  if (!isLikelyISODate(iso)) return null;
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.valueOf())) return null;
+  d.setUTCDate(d.getUTCDate() + Math.max(0, Math.trunc(days)));
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function milestoneSumPercent(project: ProjectRecord) {
+  const plan = project.funding.milestonePlan;
+  if (!plan) return null;
+  const initial = Number(plan.initialPercent ?? 0);
+  const milestones = plan.milestones ?? [];
+  const sum = milestones.reduce((acc, m) => acc + Number(m.percent ?? 0), initial);
+  return Number.isFinite(sum) ? sum : null;
 }
 
 function commitmentErrors(draft: CommitmentDraft): string[] {
@@ -370,8 +422,12 @@ function errorInfo(code: PublishValidationError): { message: string; field: Issu
       return { message: "Funding structure is incomplete.", field: "funding" };
     case "DEADLINE_INVALID":
       return { message: "Deadline is invalid.", field: "funding" };
-    case "MISSING_PROJECT_URI":
-      return { message: "Project URI (IPFS) is required for on-chain deployment.", field: "funding" };
+    case "PROJECT_URI_UPLOAD_FAILED":
+      return {
+        message:
+          "Couldn't pin the project snapshot to IPFS (Storacha). Check STORACHA_KEY and provide STORACHA_PROOF (or STORACHA_PROOF_PATH / storacha-proof.txt).",
+        field: "funding",
+      };
     case "MISSING_TOKEN_ADDRESS":
       return { message: "Accepted token address is required (or must be a valid 0x address).", field: "funding" };
     case "TOKEN_DECIMALS_INVALID":
@@ -417,12 +473,86 @@ export default function DraftEditorClient({ id }: Props) {
   // Open funding UX
   const [openFundingErrors, setOpenFundingErrors] = useState<PublishValidationError[]>([]);
   const [openingFunding, setOpeningFunding] = useState(false);
+  const [pinningManifest, setPinningManifest] = useState(false);
 
   // On-chain
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const publicClient = usePublicClient({ chainId: POLYGON_CHAIN_ID });
+  const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+
+  const [tokenMeta, setTokenMeta] = useState<
+    { status: "idle" } | { status: "loading" } | { status: "ok" } | { status: "error"; message: string }
+  >({ status: "idle" });
+  const lastDetectedTokenRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!project) return;
+
+    const tokenAddress = (project.funding.tokenAddress ?? "").trim();
+    if (!tokenAddress || !isHexAddress(tokenAddress)) {
+      lastDetectedTokenRef.current = null;
+      setTokenMeta({ status: "idle" });
+      return;
+    }
+
+    // Auto-detect only on the active chain (wallet network).
+    if (!publicClient || chainId !== POLYGON_CHAIN_ID) {
+      setTokenMeta({ status: "idle" });
+      return;
+    }
+
+    if (lastDetectedTokenRef.current === tokenAddress) return;
+
+    let canceled = false;
+    setTokenMeta({ status: "loading" });
+
+    (async () => {
+      const [symbolRaw, decimalsRaw] = await Promise.all([
+        publicClient.readContract({ address: tokenAddress, abi: ERC20Abi, functionName: "symbol" }),
+        publicClient.readContract({ address: tokenAddress, abi: ERC20Abi, functionName: "decimals" }),
+      ]);
+
+      const symbol = String(symbolRaw ?? "").trim();
+      const decimals = Number(decimalsRaw as any);
+      if (!symbol) throw new Error("TOKEN_SYMBOL_EMPTY");
+      if (!Number.isInteger(decimals) || decimals < 0 || decimals > 30) throw new Error("TOKEN_DECIMALS_INVALID");
+
+      if (canceled) return;
+      lastDetectedTokenRef.current = tokenAddress;
+      setTokenMeta({ status: "ok" });
+
+      setProject((prev) => {
+        if (!prev) return prev;
+        if (prev.id !== project.id) return prev;
+
+        const nextFunding = { ...prev.funding };
+        let changed = false;
+
+        if ((nextFunding.currency ?? "") !== symbol) {
+          nextFunding.currency = symbol;
+          changed = true;
+        }
+        if (nextFunding.tokenDecimals !== decimals) {
+          nextFunding.tokenDecimals = decimals;
+          changed = true;
+        }
+
+        return changed ? { ...prev, funding: nextFunding } : prev;
+      });
+
+      setDirtyCoreFunding(true);
+      setSaveStatus("idle");
+      if (openFundingErrors.length) setOpenFundingErrors([]);
+    })().catch((err) => {
+      if (canceled) return;
+      setTokenMeta({ status: "error", message: err instanceof Error ? err.message : String(err) });
+    });
+
+    return () => {
+      canceled = true;
+    };
+  }, [chainId, openFundingErrors.length, project, publicClient]);
 
   function hasIssue(field: IssueField) {
     return openFundingErrors.some((code) => errorInfo(code).field === field);
@@ -559,6 +689,41 @@ export default function DraftEditorClient({ id }: Props) {
     }
   }
 
+  async function pinManifestNow() {
+    if (!project) return;
+    setPinningManifest(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(id)}/pin-manifest`, { method: "POST" });
+      const raw = await res.text();
+      const json = ((): any => {
+        try {
+          return raw ? JSON.parse(raw) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      if (!res.ok) {
+        const msg = String(json?.error ?? json?.message ?? raw?.slice?.(0, 200) ?? `HTTP_${res.status}`);
+        throw new Error(msg);
+      }
+      if (!json || !("project" in json)) throw new Error("INVALID_RESPONSE");
+      setProject((json as any).project as ProjectRecord);
+      setDirtyCoreFunding(false);
+      setSaveStatus("saved");
+      setSavedAt(new Date().toISOString());
+      if (openFundingErrors.length) setOpenFundingErrors([]);
+    } catch (err) {
+      console.error("Pin manifest failed:", err);
+      const msg = err instanceof Error ? err.message : "PIN_FAILED";
+      window.alert(msg);
+      setOpenFundingErrors(["PROJECT_URI_UPLOAD_FAILED"]);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } finally {
+      setPinningManifest(false);
+    }
+  }
+
   async function openFunding() {
     if (!project) return;
 
@@ -618,7 +783,7 @@ export default function DraftEditorClient({ id }: Props) {
       }
 
       const currencyLabel = (project.funding.currency ?? "").trim();
-      const projectURI = (project.funding.projectURI ?? "").trim();
+      let projectURI = (project.funding.projectURI ?? "").trim();
       const stampURI = (project.funding.stampURI ?? "").trim() || DEFAULT_STAMP_URI;
 
       const acceptedToken =
@@ -635,6 +800,32 @@ export default function DraftEditorClient({ id }: Props) {
         return;
       }
 
+      // If the snapshot isn't pinned yet, pin it now (so the creator never needs to paste CIDs manually).
+      if (!projectURI) {
+        const pRes = await fetch(`/api/projects/${encodeURIComponent(id)}/pin-manifest`, { method: "POST" });
+        const raw = await pRes.text();
+        const pJson = ((): any => {
+          try {
+            return raw ? JSON.parse(raw) : null;
+          } catch {
+            return null;
+          }
+        })();
+
+        if (!pRes.ok || !(pJson as any)?.projectURI) {
+          const msg = String((pJson as any)?.error ?? (pJson as any)?.message ?? raw?.slice?.(0, 200) ?? `HTTP_${pRes.status}`);
+          console.error("Pin manifest failed:", pJson ?? raw);
+          window.alert(msg);
+          setOpenFundingErrors(["PROJECT_URI_UPLOAD_FAILED"]);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+          setOpeningFunding(false);
+          return;
+        }
+
+        projectURI = String((pJson as any).projectURI);
+        if ((pJson as any).project) setProject((pJson as any).project as ProjectRecord);
+      }
+
       const decimals =
         project.funding.tokenDecimals ?? (currencyLabel.toUpperCase() === "USDC" ? 6 : 18);
       if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
@@ -649,22 +840,42 @@ export default function DraftEditorClient({ id }: Props) {
       const deadline = dateToDeadlineUnixSeconds(String(project.funding.deadline ?? ""));
 
       const maxBlueSupplyBig = ceilDiv(targetAmount, stampPrice);
-      if (maxBlueSupplyBig > 4294967295n) throw new Error("MAX_BLUE_SUPPLY_TOO_LARGE");
 
-      const releaseBps = defaultReleaseBps(project.commitments.length);
+      const releaseModel = project.funding.releaseModel ?? "MILESTONE";
+      let releaseBps: number[];
+      if (releaseModel === "ALL_OR_NOTHING") {
+        releaseBps = [10000];
+      } else {
+        const plan = project.funding.milestonePlan;
+        if (plan && plan.milestones.length) {
+          const initialPct = clampInt(Number(plan.initialPercent), 0, 100);
+          const milestonePcts = plan.milestones.map((m) => clampInt(Number(m.percent), 0, 100));
+          const sumPct = milestonePcts.reduce((acc, p) => acc + p, initialPct);
+          if (sumPct !== 100) throw new Error(`MILESTONE_PCT_SUM_${sumPct}`);
+          releaseBps = [initialPct * 100, ...milestonePcts.map((p) => p * 100)];
+        } else {
+          // Back-compat fallback (older drafts).
+          releaseBps = defaultReleaseBps(project.commitments.length);
+        }
+      }
       const voteDurationDays = project.funding.voteDurationDays ?? 10;
       const voteDuration = daysToSeconds(voteDurationDays);
       const quorumBps = project.funding.quorumBps ?? 1500;
 
-      const pc = publicClient;
-      if (!pc) {
+      if (!publicClient) {
         setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-        alert("Public client is not ready. Refresh the page and try again.");
+        alert("Wallet client is not ready yet. Please reconnect your wallet and try again.");
         setOpeningFunding(false);
         return;
       }
 
-      const creationFee = await pc.readContract({
+      const factoryCode = await publicClient.getBytecode({ address: KAPRIKA_FACTORY_ADDRESS });
+      if (!factoryCode || factoryCode === "0x") {
+        throw new Error(`No contract deployed at ${KAPRIKA_FACTORY_ADDRESS} on chainId ${chainId}.`);
+      }
+
+      // Read creation fee and deploy
+      const creationFee = await publicClient.readContract({
         address: KAPRIKA_FACTORY_ADDRESS,
         abi: KaprikaProjectFactoryAbi,
         functionName: "creationFee",
@@ -683,7 +894,7 @@ export default function DraftEditorClient({ id }: Props) {
             targetAmount,
             deadline,
             stampPrice,
-            maxBlueSupply: Number(maxBlueSupplyBig),
+            maxBlueSupply: maxBlueSupplyBig,
             voteDuration,
             quorumBps,
             releaseBps,
@@ -692,7 +903,7 @@ export default function DraftEditorClient({ id }: Props) {
         value: creationFee,
       });
 
-      const receipt = await pc.waitForTransactionReceipt({ hash });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
 
       let createdProject: `0x${string}` | null = null;
       let createdProjectId: bigint | null = null;
@@ -745,9 +956,22 @@ export default function DraftEditorClient({ id }: Props) {
 
       router.push("/creator");
     } catch (e) {
-      console.error(e);
+      const msg =
+        (e && typeof e === "object" && "shortMessage" in e && typeof (e as any).shortMessage === "string"
+          ? (e as any).shortMessage
+          : null) ??
+        (e && typeof e === "object" && "message" in e && typeof (e as any).message === "string" ? (e as any).message : null) ??
+        String(e);
+
+      let userMsg = msg;
+      const milestoneSumMatch = /^MILESTONE_PCT_SUM_(\d+)$/.exec(msg);
+      if (milestoneSumMatch) {
+        userMsg = `Milestone percents must sum to 100% (currently ${milestoneSumMatch[1]}%).`;
+      }
+
+      console.error("On-chain deployment failed:", e);
       setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-      alert("On-chain deployment failed. Check the console for details.");
+      alert(`On-chain deployment failed: ${userMsg}`);
       window.scrollTo({ top: 0, behavior: "smooth" });
       setOpeningFunding(false);
       return;
@@ -1055,122 +1279,362 @@ export default function DraftEditorClient({ id }: Props) {
             }}
           >
             <div className="kvGrid">
-              <div className="kv">
+              <div className="kv" style={{ gridColumn: "1 / -1" }}>
                 <span className="kvKey">Currency</span>
-                <input
-                  value={project.funding.currency ?? ""}
-                  onChange={(e) => {
-                    const nextCurrency = (e.target.value.trim() || null) as ProjectRecord["funding"]["currency"];
-                    setProject({ ...project, funding: { ...project.funding, currency: nextCurrency } });
-                    setDirtyCoreFunding(true);
-                    setSaveStatus("idle");
-                    if (openFundingErrors.length) setOpenFundingErrors([]);
-                  }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
-                />
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                  <div>
+                    <label className="kvKey">Token contract address</label>
+                    <input
+                      value={project.funding.tokenAddress ?? ""}
+                      placeholder={process.env.NEXT_PUBLIC_KAPRIKA_USDC_ADDRESS ?? "0x..."}
+                      onChange={(e) => {
+                        const v = e.target.value.trim();
+                        lastDetectedTokenRef.current = null;
+                        setTokenMeta({ status: "idle" });
+                        setProject({ ...project, funding: { ...project.funding, tokenAddress: v || null } });
+                        setDirtyCoreFunding(true);
+                        setSaveStatus("idle");
+                        if (openFundingErrors.length) setOpenFundingErrors([]);
+                      }}
+                      style={pillFieldStyle}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="kvKey">Symbol</label>
+                    <input value={project.funding.currency ?? ""} readOnly style={pillFieldDisabledStyle} />
+                  </div>
+
+                  <div>
+                    <label className="kvKey">Decimals</label>
+                    <input
+                      value={project.funding.tokenDecimals == null ? "" : String(project.funding.tokenDecimals)}
+                      readOnly
+                      style={pillFieldDisabledStyle}
+                    />
+                  </div>
+                </div>
+
+                <div className="muted" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.35 }}>
+                  {chainId !== POLYGON_CHAIN_ID ? (
+                    <>Switch to Polygon (chainId {POLYGON_CHAIN_ID}) to auto-detect symbol/decimals.</>
+                  ) : tokenMeta.status === "loading" ? (
+                    <>Checking token contract…</>
+                  ) : tokenMeta.status === "error" ? (
+                    <>Couldn't read token metadata: {tokenMeta.message}</>
+                  ) : (
+                    <>Changing the address auto-fills symbol and decimals from the token contract.</>
+                  )}
+                </div>
               </div>
 
-              <div className="kv">
-                <span className="kvKey">Target</span>
-                <input
-                  value={project.funding.target ?? ""}
-                  onChange={(e) => {
-                    setProject({ ...project, funding: { ...project.funding, target: e.target.value } });
-                    setDirtyCoreFunding(true);
-                    setSaveStatus("idle");
-                    if (openFundingErrors.length) setOpenFundingErrors([]);
-                  }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
-                />
+              <div className="kv" style={{ gridColumn: "1 / -1" }}>
+                <span className="kvKey">Amount</span>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                  <div>
+                    <label className="kvKey">Target</label>
+                    <input
+                      inputMode="decimal"
+                      value={project.funding.target ?? ""}
+                      onChange={(e) => {
+                        setProject({ ...project, funding: { ...project.funding, target: e.target.value } });
+                        setDirtyCoreFunding(true);
+                        setSaveStatus("idle");
+                        if (openFundingErrors.length) setOpenFundingErrors([]);
+                      }}
+                      style={pillFieldStyle}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="kvKey">Minimum allocation</label>
+                    <input
+                      inputMode="decimal"
+                      value={project.funding.minimumAllocation ?? ""}
+                      onChange={(e) => {
+                        setProject({ ...project, funding: { ...project.funding, minimumAllocation: e.target.value } });
+                        setDirtyCoreFunding(true);
+                        setSaveStatus("idle");
+                        if (openFundingErrors.length) setOpenFundingErrors([]);
+                      }}
+                      style={pillFieldStyle}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="kvKey">Deadline</label>
+                    <input
+                      type="date"
+                      value={project.funding.deadline ?? ""}
+                      onChange={(e) => {
+                        setProject({ ...project, funding: { ...project.funding, deadline: e.target.value } });
+                        setDirtyCoreFunding(true);
+                        setSaveStatus("idle");
+                        if (openFundingErrors.length) setOpenFundingErrors([]);
+                      }}
+                      style={pillFieldStyle}
+                    />
+                  </div>
+                </div>
               </div>
 
-              <div className="kv">
-                <span className="kvKey">Minimum allocation</span>
-                <input
-                  value={project.funding.minimumAllocation ?? ""}
-                  onChange={(e) => {
-                    setProject({
-                      ...project,
-                      funding: { ...project.funding, minimumAllocation: e.target.value },
-                    });
-                    setDirtyCoreFunding(true);
-                    setSaveStatus("idle");
-                    if (openFundingErrors.length) setOpenFundingErrors([]);
-                  }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
-                />
+              <div className="kv" style={{ gridColumn: "1 / -1" }}>
+                <span className="kvKey">Model</span>
+
+                <div style={{ display: "grid", gap: 12 }}>
+                  <select
+                    value={project.funding.releaseModel === "ALL_OR_NOTHING" ? "ALL_OR_NOTHING" : "MILESTONE"}
+                    onChange={(e) => {
+                      const nextModel = (e.target.value.trim() || null) as ProjectRecord["funding"]["releaseModel"];
+                      const defaultPlan = {
+                        initialPercent: 20,
+                        milestones: [
+                          { name: "Milestone 1", percent: 40 },
+                          { name: "Milestone 2", percent: 40 },
+                        ],
+                      };
+
+                      const nextFunding: ProjectRecord["funding"] = {
+                        ...project.funding,
+                        releaseModel: nextModel,
+                        milestonePlan:
+                          nextModel === "MILESTONE"
+                            ? project.funding.milestonePlan ?? defaultPlan
+                            : project.funding.milestonePlan,
+                      };
+
+                      const plan = nextModel === "MILESTONE" ? nextFunding.milestonePlan : null;
+                      const needed = plan ? clampInt(plan.milestones.length, 1, 5) : 0;
+
+                      let nextCommitments = project.commitments;
+                      let commitmentsChanged = false;
+
+                      if (nextModel === "MILESTONE" && needed > 0 && project.commitments.length < needed) {
+                        const baseDeadline = project.funding.deadline ?? "";
+                        nextCommitments = project.commitments.slice();
+                        for (let i = nextCommitments.length; i < needed && i < 5; i++) {
+                          nextCommitments.push({
+                            deliverableType: "REPORT_DATASET",
+                            deadline: addDaysToISODate(baseDeadline, 30 * (i + 1)) ?? baseDeadline,
+                            verificationMethod: "PUBLIC_LINK",
+                            verificationDetails: "TBD",
+                            failureConsequence: "PAUSE_UNTIL_RESOLVED",
+                            details: `Milestone ${i + 1}: ${plan?.milestones?.[i]?.name ?? `Milestone ${i + 1}`}`.slice(0, 150),
+                          });
+                        }
+                        commitmentsChanged = true;
+                      }
+
+                      setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
+                      setDirtyCoreFunding(true);
+                      if (commitmentsChanged) setDirtyCommitments(true);
+                      setSaveStatus("idle");
+                      if (openFundingErrors.length) setOpenFundingErrors([]);
+                    }}
+                    style={pillFieldStyle}
+                  >
+                    <option value="ALL_OR_NOTHING">All-or-nothing</option>
+                    <option value="MILESTONE">Milestone</option>
+                  </select>
+
+                  {project.funding.releaseModel === "ALL_OR_NOTHING" ? (
+                    <div className="muted" style={{ fontSize: 12, lineHeight: 1.35 }}>
+                      You will be able to withdraw the full amount if the specified goal is reached.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+                        <div>
+                          <label className="kvKey">Initial tranche %</label>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={project.funding.milestonePlan?.initialPercent ?? 20}
+                            onChange={(e) => {
+                              const n = clampInt(Number(e.target.value), 0, 100);
+                              const base = project.funding.milestonePlan ?? {
+                                initialPercent: 20,
+                                milestones: [
+                                  { name: "Milestone 1", percent: 40 },
+                                  { name: "Milestone 2", percent: 40 },
+                                ],
+                              };
+                              setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...base, initialPercent: n } } });
+                              setDirtyCoreFunding(true);
+                              setSaveStatus("idle");
+                              if (openFundingErrors.length) setOpenFundingErrors([]);
+                            }}
+                            style={pillFieldStyle}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="kvKey">Milestone count</label>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={project.funding.milestonePlan?.milestones?.length ?? 2}
+                            onChange={(e) => {
+                              const count = clampInt(Number(e.target.value), 1, 5);
+                              const current = project.funding.milestonePlan ?? { initialPercent: 20, milestones: [] };
+                              const remaining = 100 - clampInt(current.initialPercent, 0, 100);
+                              const percents = distributePercents(remaining, count);
+                              const nextMilestones = Array.from({ length: count }, (_, i) => ({
+                                name: current.milestones?.[i]?.name ?? `Milestone ${i + 1}`,
+                                percent: percents[i] ?? 0,
+                              }));
+
+                              const nextFunding = { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } };
+
+                              const baseDeadline = project.funding.deadline ?? "";
+                              const nextCommitments = project.commitments.slice();
+                              for (let i = 0; i < count && i < 5; i++) {
+                                const title = `Milestone ${i + 1}: ${nextMilestones[i]?.name ?? `Milestone ${i + 1}`}`.slice(0, 150);
+                                if (!nextCommitments[i]) {
+                                  nextCommitments[i] = {
+                                    deliverableType: "REPORT_DATASET",
+                                    deadline: addDaysToISODate(baseDeadline, 30 * (i + 1)) ?? baseDeadline,
+                                    verificationMethod: "PUBLIC_LINK",
+                                    verificationDetails: "TBD",
+                                    failureConsequence: "PAUSE_UNTIL_RESOLVED",
+                                    details: title,
+                                  };
+                                } else if ((nextCommitments[i].details ?? "").startsWith(`Milestone ${i + 1}:`)) {
+                                  nextCommitments[i] = { ...nextCommitments[i], details: title };
+                                }
+                              }
+
+                              setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
+                              setDirtyCoreFunding(true);
+                              setDirtyCommitments(true);
+                              setSaveStatus("idle");
+                              if (openFundingErrors.length) setOpenFundingErrors([]);
+                            }}
+                            style={pillFieldStyle}
+                          />
+                        </div>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {(project.funding.milestonePlan?.milestones ?? []).map((m, idx) => (
+                          <div
+                            key={idx}
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "minmax(0, 2fr) minmax(160px, 1fr)",
+                              gap: 12,
+                              alignItems: "end",
+                            }}
+                          >
+                            <div>
+                              <label className="kvKey">{idx + 1}. Name</label>
+                              <input
+                                value={m.name}
+                                onChange={(e) => {
+                                  const nextName = e.target.value;
+                                  const current = project.funding.milestonePlan;
+                                  if (!current) return;
+                                  const nextMilestones = current.milestones.slice();
+                                  nextMilestones[idx] = { ...nextMilestones[idx], name: nextName };
+
+                                  const nextFunding = { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } };
+                                  const nextCommitments = project.commitments.slice();
+                                  const title = `Milestone ${idx + 1}: ${nextName}`.slice(0, 150);
+                                  let commitmentsChanged = false;
+
+                                  if (nextCommitments[idx] && (nextCommitments[idx].details ?? "").startsWith(`Milestone ${idx + 1}:`)) {
+                                    nextCommitments[idx] = { ...nextCommitments[idx], details: title };
+                                    commitmentsChanged = true;
+                                  }
+
+                                  setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
+                                  setDirtyCoreFunding(true);
+                                  if (commitmentsChanged) setDirtyCommitments(true);
+                                  setSaveStatus("idle");
+                                  if (openFundingErrors.length) setOpenFundingErrors([]);
+                                }}
+                                style={pillFieldStyle}
+                              />
+                            </div>
+
+                            <div>
+                              <label className="kvKey">{idx + 1}. %</label>
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                value={m.percent}
+                                onChange={(e) => {
+                                  const n = clampInt(Number(e.target.value), 0, 100);
+                                  const current = project.funding.milestonePlan;
+                                  if (!current) return;
+                                  const nextMilestones = current.milestones.slice();
+                                  nextMilestones[idx] = { ...nextMilestones[idx], percent: n };
+                                  setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
+                                  setDirtyCoreFunding(true);
+                                  setSaveStatus("idle");
+                                  if (openFundingErrors.length) setOpenFundingErrors([]);
+                                }}
+                                style={pillFieldStyle}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="muted" style={{ fontSize: 12, lineHeight: 1.35 }}>
+                        {(() => {
+                          const plan = project.funding.milestonePlan;
+                          if (!plan) return null;
+                          const sum = milestoneSumPercent(project);
+                          const preview = [plan.initialPercent, ...plan.milestones.map((m) => m.percent)]
+                            .map((p) => `${clampInt(Number(p), 0, 100)}%`)
+                            .join(" / ");
+                          return (
+                            <>
+                              Preview: {preview}
+                              {sum != null ? (
+                                <span style={{ display: "block", marginTop: 4, color: sum === 100 ? "var(--muted)" : "#ff9b9b" }}>
+                                  Must sum to 100% (currently {sum}%).
+                                </span>
+                              ) : null}
+                            </>
+                          );
+                        })()}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="ghostBtn"
+                          onClick={() => {
+                            const current = project.funding.milestonePlan;
+                            if (!current) return;
+                            const count = clampInt(current.milestones.length || 2, 1, 5);
+                            const remaining = 100 - clampInt(current.initialPercent, 0, 100);
+                            const percents = distributePercents(remaining, count);
+                            const nextMilestones = Array.from({ length: count }, (_, i) => ({
+                              name: current.milestones?.[i]?.name ?? `Milestone ${i + 1}`,
+                              percent: percents[i] ?? 0,
+                            }));
+                            setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
+                            setDirtyCoreFunding(true);
+                            setSaveStatus("idle");
+                            if (openFundingErrors.length) setOpenFundingErrors([]);
+                          }}
+                        >
+                          Auto-balance %
+                        </button>
+                        <div className="muted" style={{ fontSize: 12, alignSelf: "center" }}>
+                          Auto-creates required milestone commitments in the Commitments section.
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
-              <div className="kv">
-                <span className="kvKey">Deadline (YYYY-MM-DD)</span>
-                <input
-                  value={project.funding.deadline ?? ""}
-                  onChange={(e) => {
-                    setProject({ ...project, funding: { ...project.funding, deadline: e.target.value } });
-                    setDirtyCoreFunding(true);
-                    setSaveStatus("idle");
-                    if (openFundingErrors.length) setOpenFundingErrors([]);
-                  }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
-                />
-              </div>
-
-              <div className="kv">
-                <span className="kvKey">Release model</span>
-                <input
-                  value={project.funding.releaseModel ?? ""}
-                  onChange={(e) => {
-                    const nextModel = (e.target.value.trim() || null) as ProjectRecord["funding"]["releaseModel"];
-                    setProject({ ...project, funding: { ...project.funding, releaseModel: nextModel } });
-                    setDirtyCoreFunding(true);
-                    setSaveStatus("idle");
-                    if (openFundingErrors.length) setOpenFundingErrors([]);
-                  }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
-                />
-              </div>
-
-              <div className="kv">
+              <div className="kv" style={{ display: "none" }}>
                 <span className="kvKey">
                   Accepted token address <span className="muted">(optional for USDC)</span>
                 </span>
@@ -1196,7 +1660,7 @@ export default function DraftEditorClient({ id }: Props) {
                 />
               </div>
 
-              <div className="kv">
+              <div className="kv" style={{ display: "none" }}>
                 <span className="kvKey">Token decimals</span>
                 <input
                   type="number"
@@ -1221,31 +1685,101 @@ export default function DraftEditorClient({ id }: Props) {
                 />
               </div>
 
-              <div className="kv">
-                <span className="kvKey">Project URI <span className="muted">(ipfs://…)</span></span>
+              <div className="kv" style={{ gridColumn: "1 / -1" }}>
+                <span className="kvKey">
+                  Project snapshot <span className="muted">(IPFS, generated)</span>
+                </span>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 12px",
+                    border: "1px solid var(--border)",
+                    borderRadius: 999,
+                    background: "transparent",
+                  }}
+                >
+                  <div
+                    style={{
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: project.funding.projectURI ? "var(--text)" : "var(--muted)",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                      fontSize: 12,
+                    }}
+                    title={project.funding.projectURI ?? ""}
+                  >
+                    {project.funding.projectURI ?? "Not pinned yet (will pin automatically on open)"}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      onClick={pinManifestNow}
+                      disabled={pinningManifest}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: 999,
+                        border: "1px solid var(--border)",
+                        background: "transparent",
+                        color: "var(--text)",
+                        cursor: pinningManifest ? "not-allowed" : "pointer",
+                        fontSize: 12,
+                      }}
+                    >
+                      {pinningManifest ? "Pinning…" : "Pin now"}
+                    </button>
+                    {project.funding.projectURI ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProject({ ...project, funding: { ...project.funding, projectURI: null } });
+                          setDirtyCoreFunding(true);
+                          setSaveStatus("idle");
+                        }}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 999,
+                          border: "1px solid var(--border)",
+                          background: "transparent",
+                          color: "var(--muted)",
+                          cursor: "pointer",
+                          fontSize: 12,
+                        }}
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="muted" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.35 }}>
+                  We generate a JSON snapshot from this draft and pin it to IPFS right before opening funding.
+                  Use <span style={{ fontFamily: "inherit" }}>Pin now</span> only if you want to preview the CID.
+                </div>
+
+                <div style={{ height: 10 }} />
+
+                <label className="kvKey">
+                  Stamp URI <span className="muted">(optional)</span>
+                </label>
                 <input
-                  value={project.funding.projectURI ?? ""}
-                  placeholder="ipfs://YOUR_CID/project.json"
+                  value={project.funding.stampURI ?? ""}
+                  placeholder={process.env.NEXT_PUBLIC_KAPRIKA_STAMP_URI ?? "ipfs://YOUR_CID/stamp.json"}
                   onChange={(e) => {
                     const v = e.target.value.trim();
-                    setProject({ ...project, funding: { ...project.funding, projectURI: v || null } });
+                    setProject({ ...project, funding: { ...project.funding, stampURI: v || null } });
                     setDirtyCoreFunding(true);
                     setSaveStatus("idle");
                     if (openFundingErrors.length) setOpenFundingErrors([]);
                   }}
-                  style={{
-                    width: "100%",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 999,
-                    padding: "10px 12px",
-                    color: "var(--text)",
-                    fontFamily: "inherit",
-                  }}
+                  style={pillFieldStyle}
                 />
               </div>
 
-              <div className="kv">
+              <div className="kv" style={{ display: "none" }}>
                 <span className="kvKey">Stamp URI <span className="muted">(optional)</span></span>
                 <input
                   value={project.funding.stampURI ?? ""}
@@ -1269,6 +1803,14 @@ export default function DraftEditorClient({ id }: Props) {
                 />
               </div>
 
+            </div>
+          </div>
+        </section>
+
+        <section className="section" id="section-governance">
+          <h2>Governance</h2>
+          <div className="card" style={{ background: "var(--surface)" }}>
+            <div className="grid" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16 }}>
               <div className="kv">
                 <span className="kvKey">Vote duration <span className="muted">(days)</span></span>
                 <input
@@ -1291,6 +1833,9 @@ export default function DraftEditorClient({ id }: Props) {
                     fontFamily: "inherit",
                   }}
                 />
+                <div className="muted" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.35 }}>
+                  Majority is counted among those who vote (not among all stamp holders). This sets the window.
+                </div>
               </div>
 
               <div className="kv">
@@ -1315,6 +1860,9 @@ export default function DraftEditorClient({ id }: Props) {
                     fontFamily: "inherit",
                   }}
                 />
+                <div className="muted" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.35 }}>
+                  Basis points: 10000 = 100%. Example: 2000 = 20%.
+                </div>
               </div>
             </div>
           </div>
@@ -1769,15 +2317,60 @@ export default function DraftEditorClient({ id }: Props) {
               <p className="muted">No commitments yet.</p>
             )}
 
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
-              <button
-                type="button"
-                className="neutralBtn"
-                onClick={() => void save("manual")}
-                disabled={saveStatus === "saving" || (!dirtyCoreFunding && !dirtyCommitments)}
-              >
-                Save now
-              </button>
+            <div
+              className="card"
+              style={{
+                marginTop: 14,
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid var(--border)",
+                padding: 14,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+                <div>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    Draft status
+                  </div>
+                  <div className="num" style={{ fontSize: 13 }}>
+                    {saveStatus === "saving"
+                      ? "Saving…"
+                      : savedAt
+                        ? `Saved automatically • ${new Date(savedAt).toLocaleString()}`
+                        : "Saved automatically"}
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                    {readiness.ok
+                      ? "The structure is coherent. You may open funding when you want."
+                      : "The structure is not coherent yet — scroll down to the readiness list."}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    className="ghostBtn"
+                    onClick={() => void save("manual")}
+                    disabled={saveStatus === "saving" || (!dirtyCoreFunding && !dirtyCommitments)}
+                    title="Drafts are autosaved. Use this only if you want an immediate save snapshot."
+                  >
+                    Save snapshot
+                  </button>
+
+                  <button
+                    type="button"
+                    className="neutralBtn"
+                    onClick={() => void openFunding()}
+                    disabled={!readiness.ok || openingFunding || saveStatus === "saving"}
+                    title={
+                      readiness.ok
+                        ? "Deploy the project clone and open the funding window on-chain."
+                        : "Complete the required fields first."
+                    }
+                  >
+                    {openingFunding ? "Opening…" : "Open funding"}
+                  </button>
+                </div>
+              </div>
             </div>
 
             <p className="muted" style={{ marginTop: 14, marginBottom: 0 }}>

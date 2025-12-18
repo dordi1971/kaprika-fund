@@ -52,7 +52,8 @@ function humanizeErrorCode(code: string): string {
     COMMITMENTS_HAVE_CONDITIONALS: "Commitments must not contain conditionals (aim/hope/try/plan/etc).",
     COMMITMENTS_DETAILS_HAS_LINKS: "Commitment details must not contain links.",
     COMMITMENTS_REFUND_INVALID: "Partial refund commitments must include a percent (1–100).",
-    MISSING_PROJECT_URI: "Project URI (IPFS) is required for on-chain deployment.",
+    PROJECT_URI_UPLOAD_FAILED:
+      "Couldn't pin the project snapshot to IPFS (Storacha). Check STORACHA_KEY and provide STORACHA_PROOF (or STORACHA_PROOF_PATH / storacha-proof.txt).",
     MISSING_TOKEN_ADDRESS: "Accepted token address is required (or must be a valid 0x address).",
     TOKEN_DECIMALS_INVALID: "Token decimals must be a reasonable integer.",
   };
@@ -78,7 +79,7 @@ function fieldFromCode(code: string): string | undefined {
     COMMITMENTS_HAVE_CONDITIONALS: "commitments",
     COMMITMENTS_DETAILS_HAS_LINKS: "commitments",
     COMMITMENTS_REFUND_INVALID: "commitments",
-    MISSING_PROJECT_URI: "funding",
+    PROJECT_URI_UPLOAD_FAILED: "funding",
     MISSING_TOKEN_ADDRESS: "funding",
     TOKEN_DECIMALS_INVALID: "funding",
   };
