@@ -59,7 +59,7 @@ const pillFieldStyle: CSSProperties = {
 
 const pillFieldDisabledStyle: CSSProperties = {
   ...pillFieldStyle,
-  color: "var(--muted)",
+  color: "var(--dim)",
   background: "rgba(255,255,255,0.02)",
 };
 
@@ -478,31 +478,35 @@ export default function DraftEditorClient({ id }: Props) {
   // On-chain
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
-  const publicClient = usePublicClient();
+  // Always use the Polygon client for reads/detections since funding is opened on Polygon.
+  const publicClient = usePublicClient({ chainId: POLYGON_CHAIN_ID });
   const { writeContractAsync } = useWriteContract();
 
   const [tokenMeta, setTokenMeta] = useState<
-    { status: "idle" } | { status: "loading" } | { status: "ok" } | { status: "error"; message: string }
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok"; symbol: string; decimals: number }
+    | { status: "error"; message: string }
   >({ status: "idle" });
-  const lastDetectedTokenRef = useRef<string | null>(null);
+  const lastDetectedTokenKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!project) return;
 
     const tokenAddress = (project.funding.tokenAddress ?? "").trim();
     if (!tokenAddress || !isHexAddress(tokenAddress)) {
-      lastDetectedTokenRef.current = null;
+      lastDetectedTokenKeyRef.current = null;
       setTokenMeta({ status: "idle" });
       return;
     }
 
-    // Auto-detect only on the active chain (wallet network).
-    if (!publicClient || chainId !== POLYGON_CHAIN_ID) {
+    if (!publicClient) {
       setTokenMeta({ status: "idle" });
       return;
     }
 
-    if (lastDetectedTokenRef.current === tokenAddress) return;
+    const tokenKey = `${project.id}:${tokenAddress.toLowerCase()}`;
+    if (lastDetectedTokenKeyRef.current === tokenKey && tokenMeta.status === "ok") return;
 
     let canceled = false;
     setTokenMeta({ status: "loading" });
@@ -519,8 +523,8 @@ export default function DraftEditorClient({ id }: Props) {
       if (!Number.isInteger(decimals) || decimals < 0 || decimals > 30) throw new Error("TOKEN_DECIMALS_INVALID");
 
       if (canceled) return;
-      lastDetectedTokenRef.current = tokenAddress;
-      setTokenMeta({ status: "ok" });
+      lastDetectedTokenKeyRef.current = tokenKey;
+      setTokenMeta({ status: "ok", symbol, decimals });
 
       setProject((prev) => {
         if (!prev) return prev;
@@ -529,7 +533,7 @@ export default function DraftEditorClient({ id }: Props) {
         const nextFunding = { ...prev.funding };
         let changed = false;
 
-        if ((nextFunding.currency ?? "") !== symbol) {
+        if ((nextFunding.currency ?? "").trim() !== symbol) {
           nextFunding.currency = symbol;
           changed = true;
         }
@@ -552,7 +556,7 @@ export default function DraftEditorClient({ id }: Props) {
     return () => {
       canceled = true;
     };
-  }, [chainId, openFundingErrors.length, project, publicClient]);
+  }, [openFundingErrors.length, project, publicClient, tokenMeta.status]);
 
   function hasIssue(field: IssueField) {
     return openFundingErrors.some((code) => errorInfo(code).field === field);
@@ -1280,7 +1284,7 @@ export default function DraftEditorClient({ id }: Props) {
           >
             <div className="kvGrid">
               <div className="kv" style={{ gridColumn: "1 / -1" }}>
-                <span className="kvKey">Currency</span>
+
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
                   <div>
@@ -1290,7 +1294,7 @@ export default function DraftEditorClient({ id }: Props) {
                       placeholder={process.env.NEXT_PUBLIC_KAPRIKA_USDC_ADDRESS ?? "0x..."}
                       onChange={(e) => {
                         const v = e.target.value.trim();
-                        lastDetectedTokenRef.current = null;
+                        lastDetectedTokenKeyRef.current = null;
                         setTokenMeta({ status: "idle" });
                         setProject({ ...project, funding: { ...project.funding, tokenAddress: v || null } });
                         setDirtyCoreFunding(true);
@@ -1300,7 +1304,7 @@ export default function DraftEditorClient({ id }: Props) {
                       style={pillFieldStyle}
                     />
                   </div>
-
+<br />
                   <div>
                     <label className="kvKey">Symbol</label>
                     <input value={project.funding.currency ?? ""} readOnly style={pillFieldDisabledStyle} />
@@ -1317,12 +1321,12 @@ export default function DraftEditorClient({ id }: Props) {
                 </div>
 
                 <div className="muted" style={{ marginTop: 8, fontSize: 12, lineHeight: 1.35 }}>
-                  {chainId !== POLYGON_CHAIN_ID ? (
-                    <>Switch to Polygon (chainId {POLYGON_CHAIN_ID}) to auto-detect symbol/decimals.</>
-                  ) : tokenMeta.status === "loading" ? (
-                    <>Checking token contract…</>
+                  {tokenMeta.status === "loading" ? (
+                    <>Checking token contract on Polygon (chainId {POLYGON_CHAIN_ID})…</>
                   ) : tokenMeta.status === "error" ? (
                     <>Couldn't read token metadata: {tokenMeta.message}</>
+                  ) : tokenMeta.status === "ok" ? (
+                    <>Detected {tokenMeta.symbol} / {tokenMeta.decimals} decimals from the token contract.</>
                   ) : (
                     <>Changing the address auto-fills symbol and decimals from the token contract.</>
                   )}
@@ -1330,10 +1334,10 @@ export default function DraftEditorClient({ id }: Props) {
               </div>
 
               <div className="kv" style={{ gridColumn: "1 / -1" }}>
-                <span className="kvKey">Amount</span>
+                
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
                   <div>
-                    <label className="kvKey">Target</label>
+                    <label className="kvKey">Target Amount</label>
                     <input
                       inputMode="decimal"
                       value={project.funding.target ?? ""}
@@ -1594,7 +1598,7 @@ export default function DraftEditorClient({ id }: Props) {
                             <>
                               Preview: {preview}
                               {sum != null ? (
-                                <span style={{ display: "block", marginTop: 4, color: sum === 100 ? "var(--muted)" : "#ff9b9b" }}>
+                                <span style={{ display: "block", marginTop: 4, color: sum === 100 ? "var(--dim)" : "#ff9b9b" }}>
                                   Must sum to 100% (currently {sum}%).
                                 </span>
                               ) : null}
@@ -1707,7 +1711,7 @@ export default function DraftEditorClient({ id }: Props) {
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
-                      color: project.funding.projectURI ? "var(--text)" : "var(--muted)",
+                      color: project.funding.projectURI ? "var(--text)" : "var(--dim)",
                       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
                       fontSize: 12,
                     }}
@@ -1745,7 +1749,7 @@ export default function DraftEditorClient({ id }: Props) {
                           borderRadius: 999,
                           border: "1px solid var(--border)",
                           background: "transparent",
-                          color: "var(--muted)",
+                          color: "var(--dim)",
                           cursor: "pointer",
                           fontSize: 12,
                         }}
