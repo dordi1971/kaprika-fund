@@ -8,10 +8,10 @@ type Props = {
   id: string;
 };
 
-function shortAddress(address: string | null) {
-  if (!address) return "—";
-  if (address.length <= 12) return address;
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+function truncateMiddle(value: string, head = 6, tail = 4) {
+  const trimmed = value.trim();
+  if (trimmed.length <= head + tail + 3) return trimmed;
+  return `${trimmed.slice(0, head)}...${trimmed.slice(-tail)}`;
 }
 
 function formatWhen(iso: string | null) {
@@ -30,6 +30,57 @@ function formatWhen(iso: string | null) {
 export default function ProjectRecordClient({ id }: Props) {
   const [project, setProject] = useState<ProjectRecord | null>(null);
   const [status, setStatus] = useState<"loading" | "error" | "ready">("loading");
+  const [copyValue, setCopyValue] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!copyValue) return undefined;
+    const timer = window.setTimeout(() => setCopyValue(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [copyValue]);
+
+  const copyText = async (value: string) => {
+    if (!value) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        setCopyValue(value);
+        return;
+      }
+    } catch {
+      // ignore and fall back
+    }
+
+    try {
+      const el = document.createElement("textarea");
+      el.value = value;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+      setCopyValue(value);
+    } catch {
+      // ignore
+    }
+  };
+
+  const renderCopyValue = (value: string | null) => {
+    const raw = (value ?? "").trim();
+    const display = raw ? truncateMiddle(raw) : "---";
+    return (
+      <span className="onchainInfoValue">
+        <span className="mono onchainTruncate" style={{ maxWidth: "100%" }} title={raw || undefined}>
+          {display}
+        </span>
+        {raw ? (
+          <button type="button" className="copyBtn" onClick={() => void copyText(raw)}>
+            {copyValue === raw ? "Copied" : "Copy"}
+          </button>
+        ) : null}
+      </span>
+    );
+  };
 
   useEffect(() => {
     let active = true;
@@ -104,7 +155,7 @@ export default function ProjectRecordClient({ id }: Props) {
             <div className="kvGrid">
               <div className="kv">
                 <span className="kvKey">Creator</span>
-                <span className="kvValue num">{shortAddress(project.creatorAddress)}</span>
+                <div className="kvValue muted">{renderCopyValue(project.creatorAddress)}</div>
               </div>
               <div className="kv">
                 <span className="kvKey">Created</span>
@@ -116,7 +167,7 @@ export default function ProjectRecordClient({ id }: Props) {
               </div>
               <div className="kv">
                 <span className="kvKey">Contract</span>
-                <span className="kvValue num">{shortAddress(project.funding.contractAddress)}</span>
+                <div className="kvValue muted">{renderCopyValue(project.funding.contractAddress)}</div>
               </div>
             </div>
           </div>
@@ -141,4 +192,3 @@ export default function ProjectRecordClient({ id }: Props) {
     </main>
   );
 }
-

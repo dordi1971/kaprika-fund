@@ -209,6 +209,29 @@ a {
   justify-content: flex-end;
 }
 
+.topBarUtilityGroup {
+  gap: 10px;
+  align-items: center;
+}
+
+.desktopOnly {
+  display: flex;
+}
+
+.mobileOnly {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .desktopOnly {
+    display: none;
+  }
+
+  .mobileOnly {
+    display: flex;
+  }
+}
+
 .themeToggle {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -581,6 +604,13 @@ p {
   color: var(--dim);
 }
 
+.projectDesc {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.35;
+  max-width: 64ch;
+}
+
 .badge {
   display: inline-block;
   font-size: 11px;
@@ -594,6 +624,8 @@ p {
 .badgeActive {
   color: var(--accent);
   border-color: var(--accent);
+  width: 100%;
+  text-align: center;
 }
 
 .badgeCompleted {
@@ -629,6 +661,241 @@ p {
 .barFill {
   height: 100%;
   background: var(--text);
+}
+
+.onchainInfoRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.onchainInfoValue {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.onchainTruncate {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.onchainStats .kv {
+  border-top: none;
+  padding-top: 0;
+}
+
+.copyBtn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.copyBtn:hover {
+  border-color: color-mix(in oklab, var(--accent) 60%, var(--border));
+  color: var(--accent);
+}
+
+.onchainPage {
+  max-width: 980px;
+  padding: 40px 18px;
+}
+
+@media (max-width: 900px) {
+  .indexMeta {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .observeTable {
+    display: block;
+  }
+
+  .observeTable thead {
+    display: none;
+  }
+
+  .observeTable tbody {
+    display: block;
+  }
+
+  .observeTable tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+    background: color-mix(in oklab, var(--panel) 70%, transparent);
+  }
+
+  .observeTable td {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px dashed color-mix(in oklab, var(--border) 70%, transparent);
+    text-align: left;
+  }
+
+  .observeTable td::before {
+    content: attr(data-label);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  .observeTable td:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .observeTable td:first-child {
+    padding-top: 0;
+  }
+
+  .observeTable .rightAlign {
+    text-align: left;
+  }
+
+  .observeTable .projectDesc {
+    max-width: none;
+  }
+
+  .stackTable {
+    display: block;
+  }
+
+  .stackTable thead {
+    display: none;
+  }
+
+  .stackTable tbody {
+    display: block;
+  }
+
+  .stackTable tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+    background: color-mix(in oklab, var(--panel) 70%, transparent);
+  }
+
+  .stackTable td {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px dashed color-mix(in oklab, var(--border) 70%, transparent);
+    text-align: left;
+  }
+
+  .stackTable td::before {
+    content: attr(data-label);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  .stackTable td:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .stackTable td:first-child {
+    padding-top: 0;
+  }
+
+  .stackTable .rightAlign {
+    text-align: left;
+  }
+
+  .stackTable .actionStack {
+    justify-content: flex-start;
+  }
+
+  .onchainPage {
+    padding: 28px 16px;
+  }
+
+  .onchainBottom .card {
+    padding: 16px;
+  }
+
+  .onchainInfoRow {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .onchainInfoValue {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .onchainTruncate {
+    max-width: 100%;
+  }
+
+  .onchainCommitTable {
+    display: block;
+  }
+
+  .onchainCommitTable thead {
+    display: none;
+  }
+
+  .onchainCommitTable tbody {
+    display: block;
+  }
+
+  .onchainCommitTable tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+    background: color-mix(in oklab, var(--panel) 70%, transparent);
+  }
+
+  .onchainCommitTable td {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px dashed color-mix(in oklab, var(--border) 70%, transparent);
+    text-align: left;
+  }
+
+  .onchainCommitTable td::before {
+    content: attr(data-label);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+
+  .onchainCommitTable td:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .onchainCommitTable td:first-child {
+    padding-top: 0;
+  }
 }
 
 .barFillActive {
@@ -729,6 +996,13 @@ p {
   background: var(--surface);
 }
 
+.actionStack {
+  display: inline-flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .neutralBtn {
   display: inline-block;
   background: var(--text);
@@ -787,12 +1061,25 @@ p {
 .modalOverlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.82);
+  background: rgba(0, 0, 0, 0);
   backdrop-filter: blur(2px);
   display: grid;
   place-items: center;
   padding: 18px;
-  z-index: 1000;
+  z-index: -1000;
+}
+
+.helpOverlay {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 96px 24px 24px;
+}
+
+.helpPanel {
+  width: min(520px, 92vw);
+  max-height: calc(100vh - 120px);
+  overflow: auto;
 }
 
 .modal {
@@ -819,6 +1106,75 @@ p {
   justify-content: flex-end;
 }
 
+.drawerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.drawerPanel {
+  font-family: 'KHTekaMono';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(360px, 88vw);
+  background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+}
+
+.drawerHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawerBody {
+  padding: 12px 12px;
+  overflow: auto;
+}
+
+.drawerActions {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.drawerActions .neutralBtn {
+  width: 100%;
+}
+
+.drawerActions .themeToggle {
+  width: 100%;
+  text-align: center;
+}
+
+.drawerLink {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-decoration: none;
+  margin-bottom: 10px;
+}
+
+.drawerLinkActive {
+  outline: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.drawerHint {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-top: 2px;
+}
+
 .skeletonLine {
   height: 12px;
   width: 100%;
@@ -834,6 +1190,19 @@ p {
 }
 
 @media (max-width: 860px) {
+  .helpOverlay {
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .helpPanel {
+    width: 100%;
+    max-height: 85vh;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
   .sysId {
     display: none;
   }
@@ -886,6 +1255,12 @@ p {
   gap: 14px;
 }
 
+.inputRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
 .input {
   width: 100%;
   padding: 10px 12px;
@@ -897,6 +1272,10 @@ p {
 
 @media (max-width: 860px) {
   .grid2 {
+    grid-template-columns: 1fr;
+  }
+
+  .inputRow {
     grid-template-columns: 1fr;
   }
 }

@@ -11,6 +11,7 @@ export type PublishValidationError =
   | "OTHER_DELIVERABLE_EXAMPLE_REQUIRED"
   | "OTHER_DELIVERABLE_EXAMPLE_INVALID"
   | "FUNDING_INCOMPLETE"
+  | "MILESTONE_COMMITMENTS_REQUIRED"
   | "MISSING_COMMITMENTS"
   | "COMMITMENTS_TOO_MANY"
   | "COMMITMENTS_INVALID"
@@ -64,6 +65,13 @@ export function validateOpenFunding(project: ProjectRecord) {
     !funding.releaseModel
   ) {
     errors.push("FUNDING_INCOMPLETE");
+  }
+
+  if (funding.releaseModel === "MILESTONE") {
+    const milestoneCount = funding.milestonePlan?.milestones?.length ?? 0;
+    if (milestoneCount > 0 && project.commitments.length < milestoneCount) {
+      errors.push("MILESTONE_COMMITMENTS_REQUIRED");
+    }
   }
 
   if (!project.commitments.length) errors.push("MISSING_COMMITMENTS");

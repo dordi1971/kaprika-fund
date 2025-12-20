@@ -8,6 +8,7 @@ import { decodeEventLog } from "viem";
 import type { Commitment, ProjectRecord } from "@/lib/creator/types";
 import { validateOpenFunding, type PublishValidationError } from "@/lib/creator/validation";
 import ExternalLinksEditor from "./ExternalLinksEditor";
+import AppModal from "@/components/AppModal";
 import { ERC20Abi, KaprikaProjectFactoryAbi } from "@/lib/contracts/abis";
 import { DEFAULT_STAMP_URI, DEFAULT_USDC_ADDRESS, KAPRIKA_FACTORY_ADDRESS, POLYGON_CHAIN_ID } from "@/lib/contracts/addresses";
 import {
@@ -45,6 +46,19 @@ const FIELD_ANCHOR: Record<IssueField, string> = {
   core: "section-core",
   funding: "section-funding",
   commitments: "section-commitments",
+};
+
+type ModalAction = {
+  label: string;
+  onClick: () => void;
+  variant?: "ghost" | "neutral";
+};
+
+type ModalState = {
+  title: string;
+  message: string;
+  actions: ModalAction[];
+  onClose?: () => void;
 };
 
 const pillFieldStyle: CSSProperties = {
@@ -128,6 +142,35 @@ function addDaysToISODate(iso: string, days: number) {
   return `${y}-${m}-${day}`;
 }
 
+function buildMilestoneCommitment(plan: ProjectRecord["funding"]["milestonePlan"], index: number, baseDeadline: string) {
+  const name = plan?.milestones?.[index]?.name ?? `Milestone ${index + 1}`;
+  return {
+    deliverableType: "REPORT_DATASET",
+    deadline: addDaysToISODate(baseDeadline, 30 * (index + 1)) ?? baseDeadline,
+    verificationMethod: "PUBLIC_LINK",
+    verificationDetails: "TBD",
+    failureConsequence: "PAUSE_UNTIL_RESOLVED",
+    details: `Milestone ${index + 1}: ${name}`.slice(0, 150),
+  } satisfies Commitment;
+}
+
+function ensureMilestoneCommitments(project: ProjectRecord) {
+  if (project.funding.releaseModel !== "MILESTONE") return { project, changed: false };
+  const plan = project.funding.milestonePlan;
+  if (!plan || !plan.milestones.length) return { project, changed: false };
+
+  const required = clampInt(plan.milestones.length, 0, 5);
+  if (project.commitments.length >= required) return { project, changed: false };
+
+  const baseDeadline = project.funding.deadline ?? "";
+  const nextCommitments = project.commitments.slice();
+  for (let i = nextCommitments.length; i < required && i < 5; i++) {
+    nextCommitments.push(buildMilestoneCommitment(plan, i, baseDeadline));
+  }
+
+  return { project: { ...project, commitments: nextCommitments }, changed: true };
+}
+
 function milestoneSumPercent(project: ProjectRecord) {
   const plan = project.funding.milestonePlan;
   if (!plan) return null;
@@ -195,6 +238,19 @@ function toCommitment(draft: CommitmentDraft): Commitment | null {
   }
 
   return commitment;
+}
+
+function commitmentToDraft(c: Commitment): CommitmentDraft {
+  return {
+    deliverableType: c.deliverableType,
+    deadline: c.deadline,
+    verificationMethod: c.verificationMethod,
+    verificationDetails: c.verificationDetails,
+    failureConsequence: c.failureConsequence,
+    refundPercent: c.refundPercent != null ? String(c.refundPercent) : "",
+    voteDurationDays: c.voteDurationDays != null ? String(c.voteDurationDays) : "",
+    details: c.details,
+  };
 }
 
 function labelFor(items: ReadonlyArray<{ value: string; label: string }>, value: string | null | undefined) {
@@ -420,6 +476,8 @@ function errorInfo(code: PublishValidationError): { message: string; field: Issu
       return { message: "Example deliverable must be ≤150 chars and not contain links or conditionals.", field: "core" };
     case "FUNDING_INCOMPLETE":
       return { message: "Funding structure is incomplete.", field: "funding" };
+    case "MILESTONE_COMMITMENTS_REQUIRED":
+      return { message: "Milestone commitments are required for each milestone.", field: "commitments" };
     case "DEADLINE_INVALID":
       return { message: "Deadline is invalid.", field: "funding" };
     case "PROJECT_URI_UPLOAD_FAILED":
@@ -470,10 +528,15 @@ export default function DraftEditorClient({ id }: Props) {
   const [commitmentDraft, setCommitmentDraft] = useState<CommitmentDraft>(() => emptyCommitmentDraft());
   const [editingCommitmentIndex, setEditingCommitmentIndex] = useState<number | null>(null);
 
+  // Milestone commitment builder
+  const [milestoneCommitmentDraft, setMilestoneCommitmentDraft] = useState<CommitmentDraft>(() => emptyCommitmentDraft());
+  const [editingMilestoneCommitmentIndex, setEditingMilestoneCommitmentIndex] = useState<number | null>(null);
+
   // Open funding UX
   const [openFundingErrors, setOpenFundingErrors] = useState<PublishValidationError[]>([]);
   const [openingFunding, setOpeningFunding] = useState(false);
   const [pinningManifest, setPinningManifest] = useState(false);
+  const [modal, setModal] = useState<ModalState | null>(null);
 
   // On-chain
   const { address, isConnected } = useAccount();
@@ -481,6 +544,47 @@ export default function DraftEditorClient({ id }: Props) {
   // Always use the Polygon client for reads/detections since funding is opened on Polygon.
   const publicClient = usePublicClient({ chainId: POLYGON_CHAIN_ID });
   const { writeContractAsync } = useWriteContract();
+
+  const showAlert = (message: string, title = "// NOTICE") => {
+    const close = () => setModal(null);
+    setModal({
+      title,
+      message,
+      onClose: close,
+      actions: [
+        {
+          label: "OK",
+          variant: "neutral",
+          onClick: close,
+        },
+      ],
+    });
+  };
+
+  const confirmModal = (message: string, title = "// CONFIRM") =>
+    new Promise<boolean>((resolve) => {
+      const close = (value: boolean) => {
+        setModal(null);
+        resolve(value);
+      };
+      setModal({
+        title,
+        message,
+        onClose: () => close(false),
+        actions: [
+          {
+            label: "Cancel",
+            variant: "ghost",
+            onClick: () => close(false),
+          },
+          {
+            label: "Continue",
+            variant: "neutral",
+            onClick: () => close(true),
+          },
+        ],
+      });
+    });
 
   const [tokenMeta, setTokenMeta] = useState<
     | { status: "idle" }
@@ -567,6 +671,19 @@ export default function DraftEditorClient({ id }: Props) {
     return validateOpenFunding(project);
   }, [project]);
 
+  const milestoneCount =
+    project && project.funding.releaseModel === "MILESTONE"
+      ? clampInt(project.funding.milestonePlan?.milestones?.length ?? 0, 0, 5)
+      : 0;
+  const milestoneCommitments = project ? project.commitments.slice(0, milestoneCount) : [];
+  const extraCommitments = project ? project.commitments.slice(milestoneCount) : [];
+  const maxExtraCommitments = Math.max(0, 5 - milestoneCount);
+  const activeMilestoneIndex = editingMilestoneCommitmentIndex ?? 0;
+  const activeMilestone =
+    project && project.funding.releaseModel === "MILESTONE"
+      ? project.funding.milestonePlan?.milestones?.[activeMilestoneIndex] ?? null
+      : null;
+
   const commitmentDraftErrors = useMemo(() => commitmentErrors(commitmentDraft), [commitmentDraft]);
   const commitmentDraftValue = useMemo(() => toCommitment(commitmentDraft), [commitmentDraft]);
 
@@ -574,7 +691,7 @@ export default function DraftEditorClient({ id }: Props) {
     if (!project) return null;
     if (!commitmentDraftValue) return null;
 
-    const same = project.commitments.findIndex((c, idx) => {
+    const same = extraCommitments.findIndex((c, idx) => {
       if (editingCommitmentIndex != null && idx === editingCommitmentIndex) return false;
       return (
         c.deliverableType === commitmentDraftValue.deliverableType &&
@@ -583,8 +700,37 @@ export default function DraftEditorClient({ id }: Props) {
       );
     });
 
-    return same === -1 ? null : `Looks like a duplicate of Commitment ${same + 1}.`;
-  }, [commitmentDraftValue, editingCommitmentIndex, project]);
+    if (same === -1) return null;
+    return milestoneCount
+      ? `Looks like a duplicate of Additional commitment ${same + 1}.`
+      : `Looks like a duplicate of Commitment ${same + 1}.`;
+  }, [commitmentDraftValue, editingCommitmentIndex, extraCommitments, milestoneCount, project]);
+
+  const milestoneCommitmentDraftErrors = useMemo(
+    () => commitmentErrors(milestoneCommitmentDraft),
+    [milestoneCommitmentDraft],
+  );
+  const milestoneCommitmentDraftValue = useMemo(
+    () => toCommitment(milestoneCommitmentDraft),
+    [milestoneCommitmentDraft],
+  );
+
+  const duplicateMilestoneCommitmentWarning = useMemo(() => {
+    if (!project) return null;
+    if (!milestoneCommitmentDraftValue) return null;
+    if (!milestoneCount) return null;
+
+    const same = milestoneCommitments.findIndex((c, idx) => {
+      if (editingMilestoneCommitmentIndex != null && idx === editingMilestoneCommitmentIndex) return false;
+      return (
+        c.deliverableType === milestoneCommitmentDraftValue.deliverableType &&
+        c.deadline === milestoneCommitmentDraftValue.deadline &&
+        c.details === milestoneCommitmentDraftValue.details
+      );
+    });
+
+    return same === -1 ? null : `Looks like a duplicate of Milestone ${same + 1}.`;
+  }, [editingMilestoneCommitmentIndex, milestoneCommitmentDraftValue, milestoneCommitments, milestoneCount, project]);
 
   useEffect(() => {
     let active = true;
@@ -595,13 +741,16 @@ export default function DraftEditorClient({ id }: Props) {
         if (!res.ok) throw new Error("FAILED");
         const json = (await res.json()) as { project: ProjectRecord };
         if (!active) return;
-        setProject(json.project);
+        const normalized = ensureMilestoneCommitments(json.project);
+        setProject(normalized.project);
         setCommitmentDraft(emptyCommitmentDraft());
         setEditingCommitmentIndex(null);
+        setMilestoneCommitmentDraft(emptyCommitmentDraft());
+        setEditingMilestoneCommitmentIndex(null);
         setStatus("ready");
         setSaveStatus("idle");
         setDirtyCoreFunding(false);
-        setDirtyCommitments(false);
+        setDirtyCommitments(normalized.changed);
         setOpenFundingErrors([]);
       } catch {
         if (!active) return;
@@ -720,7 +869,7 @@ export default function DraftEditorClient({ id }: Props) {
     } catch (err) {
       console.error("Pin manifest failed:", err);
       const msg = err instanceof Error ? err.message : "PIN_FAILED";
-      window.alert(msg);
+      showAlert(msg, "// PIN FAILED");
       setOpenFundingErrors(["PROJECT_URI_UPLOAD_FAILED"]);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } finally {
@@ -758,7 +907,10 @@ export default function DraftEditorClient({ id }: Props) {
     }
 
     // 2) Lock confirmation
-    const ok = window.confirm("Opening funding locks the structure. Explanation may change, structure may not.");
+    const ok = await confirmModal(
+      "Opening funding locks the structure. Explanation may change, structure may not.",
+      "// OPEN FUNDING",
+    );
     if (!ok) {
       setOpeningFunding(false);
       return;
@@ -774,14 +926,17 @@ export default function DraftEditorClient({ id }: Props) {
       }
       if (chainId !== POLYGON_CHAIN_ID) {
         setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-        alert("Please switch your wallet network to Polygon (chainId 137) and try again.");
+        showAlert(
+          "Please switch your wallet network to Polygon (chainId 137) and try again.",
+          "// NETWORK REQUIRED",
+        );
         setOpeningFunding(false);
         return;
       }
 
       if (!isHexAddress(KAPRIKA_FACTORY_ADDRESS)) {
         setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-        alert("Missing NEXT_PUBLIC_KAPRIKA_FACTORY_ADDRESS.");
+        showAlert("Missing NEXT_PUBLIC_KAPRIKA_FACTORY_ADDRESS.", "// CONFIG REQUIRED");
         setOpeningFunding(false);
         return;
       }
@@ -819,7 +974,7 @@ export default function DraftEditorClient({ id }: Props) {
         if (!pRes.ok || !(pJson as any)?.projectURI) {
           const msg = String((pJson as any)?.error ?? (pJson as any)?.message ?? raw?.slice?.(0, 200) ?? `HTTP_${pRes.status}`);
           console.error("Pin manifest failed:", pJson ?? raw);
-          window.alert(msg);
+          showAlert(msg, "// PIN FAILED");
           setOpenFundingErrors(["PROJECT_URI_UPLOAD_FAILED"]);
           window.scrollTo({ top: 0, behavior: "smooth" });
           setOpeningFunding(false);
@@ -868,7 +1023,10 @@ export default function DraftEditorClient({ id }: Props) {
 
       if (!publicClient) {
         setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-        alert("Wallet client is not ready yet. Please reconnect your wallet and try again.");
+        showAlert(
+          "Wallet client is not ready yet. Please reconnect your wallet and try again.",
+          "// WALLET REQUIRED",
+        );
         setOpeningFunding(false);
         return;
       }
@@ -975,7 +1133,7 @@ export default function DraftEditorClient({ id }: Props) {
 
       console.error("On-chain deployment failed:", e);
       setOpenFundingErrors(["FUNDING_INCOMPLETE"]);
-      alert(`On-chain deployment failed: ${userMsg}`);
+      showAlert(`On-chain deployment failed: ${userMsg}`, "// DEPLOYMENT FAILED");
       window.scrollTo({ top: 0, behavior: "smooth" });
       setOpeningFunding(false);
       return;
@@ -1408,26 +1566,17 @@ export default function DraftEditorClient({ id }: Props) {
                             : project.funding.milestonePlan,
                       };
 
-                      const plan = nextModel === "MILESTONE" ? nextFunding.milestonePlan : null;
-                      const needed = plan ? clampInt(plan.milestones.length, 1, 5) : 0;
-
                       let nextCommitments = project.commitments;
                       let commitmentsChanged = false;
 
-                      if (nextModel === "MILESTONE" && needed > 0 && project.commitments.length < needed) {
-                        const baseDeadline = project.funding.deadline ?? "";
-                        nextCommitments = project.commitments.slice();
-                        for (let i = nextCommitments.length; i < needed && i < 5; i++) {
-                          nextCommitments.push({
-                            deliverableType: "REPORT_DATASET",
-                            deadline: addDaysToISODate(baseDeadline, 30 * (i + 1)) ?? baseDeadline,
-                            verificationMethod: "PUBLIC_LINK",
-                            verificationDetails: "TBD",
-                            failureConsequence: "PAUSE_UNTIL_RESOLVED",
-                            details: `Milestone ${i + 1}: ${plan?.milestones?.[i]?.name ?? `Milestone ${i + 1}`}`.slice(0, 150),
-                          });
-                        }
-                        commitmentsChanged = true;
+                      if (nextModel === "MILESTONE") {
+                        const normalized = ensureMilestoneCommitments({
+                          ...project,
+                          funding: nextFunding,
+                          commitments: nextCommitments,
+                        });
+                        nextCommitments = normalized.project.commitments;
+                        commitmentsChanged = normalized.changed;
                       }
 
                       setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
@@ -1489,21 +1638,15 @@ export default function DraftEditorClient({ id }: Props) {
                                 percent: percents[i] ?? 0,
                               }));
 
-                              const nextFunding = { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } };
+                              const nextPlan = { ...current, milestones: nextMilestones };
+                              const nextFunding = { ...project.funding, milestonePlan: nextPlan };
 
                               const baseDeadline = project.funding.deadline ?? "";
                               const nextCommitments = project.commitments.slice();
                               for (let i = 0; i < count && i < 5; i++) {
                                 const title = `Milestone ${i + 1}: ${nextMilestones[i]?.name ?? `Milestone ${i + 1}`}`.slice(0, 150);
                                 if (!nextCommitments[i]) {
-                                  nextCommitments[i] = {
-                                    deliverableType: "REPORT_DATASET",
-                                    deadline: addDaysToISODate(baseDeadline, 30 * (i + 1)) ?? baseDeadline,
-                                    verificationMethod: "PUBLIC_LINK",
-                                    verificationDetails: "TBD",
-                                    failureConsequence: "PAUSE_UNTIL_RESOLVED",
-                                    details: title,
-                                  };
+                                  nextCommitments[i] = buildMilestoneCommitment(nextPlan, i, baseDeadline);
                                 } else if ((nextCommitments[i].details ?? "").startsWith(`Milestone ${i + 1}:`)) {
                                   nextCommitments[i] = { ...nextCommitments[i], details: title };
                                 }
@@ -1520,118 +1663,8 @@ export default function DraftEditorClient({ id }: Props) {
                         </div>
                       </div>
 
-                      <div style={{ display: "grid", gap: 10 }}>
-                        {(project.funding.milestonePlan?.milestones ?? []).map((m, idx) => (
-                          <div
-                            key={idx}
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "minmax(0, 2fr) minmax(160px, 1fr)",
-                              gap: 12,
-                              alignItems: "end",
-                            }}
-                          >
-                            <div>
-                              <label className="kvKey">{idx + 1}. Name</label>
-                              <input
-                                value={m.name}
-                                onChange={(e) => {
-                                  const nextName = e.target.value;
-                                  const current = project.funding.milestonePlan;
-                                  if (!current) return;
-                                  const nextMilestones = current.milestones.slice();
-                                  nextMilestones[idx] = { ...nextMilestones[idx], name: nextName };
-
-                                  const nextFunding = { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } };
-                                  const nextCommitments = project.commitments.slice();
-                                  const title = `Milestone ${idx + 1}: ${nextName}`.slice(0, 150);
-                                  let commitmentsChanged = false;
-
-                                  if (nextCommitments[idx] && (nextCommitments[idx].details ?? "").startsWith(`Milestone ${idx + 1}:`)) {
-                                    nextCommitments[idx] = { ...nextCommitments[idx], details: title };
-                                    commitmentsChanged = true;
-                                  }
-
-                                  setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
-                                  setDirtyCoreFunding(true);
-                                  if (commitmentsChanged) setDirtyCommitments(true);
-                                  setSaveStatus("idle");
-                                  if (openFundingErrors.length) setOpenFundingErrors([]);
-                                }}
-                                style={pillFieldStyle}
-                              />
-                            </div>
-
-                            <div>
-                              <label className="kvKey">{idx + 1}. %</label>
-                              <input
-                                type="number"
-                                inputMode="numeric"
-                                value={m.percent}
-                                onChange={(e) => {
-                                  const n = clampInt(Number(e.target.value), 0, 100);
-                                  const current = project.funding.milestonePlan;
-                                  if (!current) return;
-                                  const nextMilestones = current.milestones.slice();
-                                  nextMilestones[idx] = { ...nextMilestones[idx], percent: n };
-                                  setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
-                                  setDirtyCoreFunding(true);
-                                  setSaveStatus("idle");
-                                  if (openFundingErrors.length) setOpenFundingErrors([]);
-                                }}
-                                style={pillFieldStyle}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-
                       <div className="muted" style={{ fontSize: 12, lineHeight: 1.35 }}>
-                        {(() => {
-                          const plan = project.funding.milestonePlan;
-                          if (!plan) return null;
-                          const sum = milestoneSumPercent(project);
-                          const preview = [plan.initialPercent, ...plan.milestones.map((m) => m.percent)]
-                            .map((p) => `${clampInt(Number(p), 0, 100)}%`)
-                            .join(" / ");
-                          return (
-                            <>
-                              Preview: {preview}
-                              {sum != null ? (
-                                <span style={{ display: "block", marginTop: 4, color: sum === 100 ? "var(--dim)" : "#ff9b9b" }}>
-                                  Must sum to 100% (currently {sum}%).
-                                </span>
-                              ) : null}
-                            </>
-                          );
-                        })()}
-                      </div>
-
-                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                        <button
-                          type="button"
-                          className="ghostBtn"
-                          onClick={() => {
-                            const current = project.funding.milestonePlan;
-                            if (!current) return;
-                            const count = clampInt(current.milestones.length || 2, 1, 5);
-                            const remaining = 100 - clampInt(current.initialPercent, 0, 100);
-                            const percents = distributePercents(remaining, count);
-                            const nextMilestones = Array.from({ length: count }, (_, i) => ({
-                              name: current.milestones?.[i]?.name ?? `Milestone ${i + 1}`,
-                              percent: percents[i] ?? 0,
-                            }));
-                            setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
-                            setDirtyCoreFunding(true);
-                            setSaveStatus("idle");
-                            if (openFundingErrors.length) setOpenFundingErrors([]);
-                          }}
-                        >
-                          Auto-balance %
-                        </button>
-                        <div className="muted" style={{ fontSize: 12, alignSelf: "center" }}>
-                          Auto-creates required milestone commitments in the Commitments section.
-                        </div>
+                        Milestone names, percents, and commitment details are defined in the Milestone commitments section below.
                       </div>
                     </>
                   )}
@@ -1694,10 +1727,8 @@ export default function DraftEditorClient({ id }: Props) {
                   Project snapshot <span className="muted">(IPFS, generated)</span>
                 </span>
                 <div
+                  className="inputRow"
                   style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) auto",
-                    alignItems: "center",
                     gap: 10,
                     padding: "10px 12px",
                     border: "1px solid var(--border)",
@@ -1719,7 +1750,7 @@ export default function DraftEditorClient({ id }: Props) {
                   >
                     {project.funding.projectURI ?? "Not pinned yet (will pin automatically on open)"}
                   </div>
-                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
                     <button
                       type="button"
                       onClick={pinManifestNow}
@@ -1814,7 +1845,7 @@ export default function DraftEditorClient({ id }: Props) {
         <section className="section" id="section-governance">
           <h2>Governance</h2>
           <div className="card" style={{ background: "var(--surface)" }}>
-            <div className="grid" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 16 }}>
+            <div className="splitGrid" style={{ gap: 16 }}>
               <div className="kv">
                 <span className="kvKey">Vote duration <span className="muted">(days)</span></span>
                 <input
@@ -1873,7 +1904,545 @@ export default function DraftEditorClient({ id }: Props) {
         </section>
 
         <section className="section" id="section-commitments">
-          <h2>Commitments (1–5)</h2>
+          <h2>Commitments (1-5)</h2>
+          {project.funding.releaseModel === "MILESTONE" && project.funding.milestonePlan ? (
+            <div
+              className="card"
+              style={{
+                background: "var(--surface)",
+                border: hasIssue("commitments") ? "1px solid var(--border)" : undefined,
+                marginBottom: 14,
+              }}
+            >
+              <div
+                className="muted"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  marginTop: -2,
+                  marginBottom: 10,
+                  fontSize: 12,
+                }}
+              >
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <span>Milestone commitments are tied to funding tranches.</span>
+                  <span>Names and percents define the release schedule.</span>
+                </div>
+                <div className="num">
+                  {milestoneCommitments.length}/{milestoneCount}
+                </div>
+              </div>
+
+              <div className="muted" style={{ fontSize: 12, lineHeight: 1.35, marginBottom: 10 }}>
+                {(() => {
+                  const plan = project.funding.milestonePlan;
+                  if (!plan) return null;
+                  const sum = milestoneSumPercent(project);
+                  const preview = [plan.initialPercent, ...plan.milestones.map((m) => m.percent)]
+                    .map((p) => `${clampInt(Number(p), 0, 100)}%`)
+                    .join(" / ");
+                  return (
+                    <>
+                      Preview: {preview}
+                      {sum != null ? (
+                        <span style={{ display: "block", marginTop: 4, color: sum === 100 ? "var(--dim)" : "#ff9b9b" }}>
+                          Must sum to 100% (currently {sum}%).
+                        </span>
+                      ) : null}
+                    </>
+                  );
+                })()}
+              </div>
+
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+                <button
+                  type="button"
+                  className="ghostBtn"
+                  onClick={() => {
+                    const current = project.funding.milestonePlan;
+                    if (!current) return;
+                    const count = clampInt(current.milestones.length || 2, 1, 5);
+                    const remaining = 100 - clampInt(current.initialPercent, 0, 100);
+                    const percents = distributePercents(remaining, count);
+                    const nextMilestones = Array.from({ length: count }, (_, i) => ({
+                      name: current.milestones?.[i]?.name ?? `Milestone ${i + 1}`,
+                      percent: percents[i] ?? 0,
+                    }));
+                    setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
+                    setDirtyCoreFunding(true);
+                    setSaveStatus("idle");
+                    if (openFundingErrors.length) setOpenFundingErrors([]);
+                  }}
+                >
+                  Auto-balance %
+                </button>
+                <div className="muted" style={{ fontSize: 12, alignSelf: "center" }}>
+                  Distributes the remaining percent across milestones.
+                </div>
+              </div>
+
+              {editingMilestoneCommitmentIndex != null ? (
+                <div className="splitGrid" style={{ alignItems: "start" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, marginBottom: 10 }}>
+                      Milestone Commitment Builder
+                      <span className="muted num" style={{ marginLeft: 8, fontWeight: 400 }}>
+                        (milestone #{editingMilestoneCommitmentIndex + 1})
+                      </span>
+                    </div>
+
+                    <div className="splitGrid">
+                      <div>
+                        <label className="kvKey">Milestone name</label>
+                        <input
+                          value={activeMilestone?.name ?? ""}
+                          onChange={(e) => {
+                            if (editingMilestoneCommitmentIndex == null) return;
+                            const nextName = e.target.value;
+                            const current = project.funding.milestonePlan;
+                            if (!current) return;
+                            const nextMilestones = current.milestones.slice();
+                            nextMilestones[editingMilestoneCommitmentIndex] = { ...nextMilestones[editingMilestoneCommitmentIndex], name: nextName };
+
+                            const nextFunding = { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } };
+                            const nextCommitments = project.commitments.slice();
+                            const title = `Milestone ${editingMilestoneCommitmentIndex + 1}: ${nextName}`.slice(0, 150);
+                            let commitmentsChanged = false;
+
+                            if (
+                              nextCommitments[editingMilestoneCommitmentIndex] &&
+                              (nextCommitments[editingMilestoneCommitmentIndex].details ?? "").startsWith(
+                                `Milestone ${editingMilestoneCommitmentIndex + 1}:`,
+                              )
+                            ) {
+                              nextCommitments[editingMilestoneCommitmentIndex] = {
+                                ...nextCommitments[editingMilestoneCommitmentIndex],
+                                details: title,
+                              };
+                              commitmentsChanged = true;
+                            }
+
+                            setProject({ ...project, funding: nextFunding, commitments: nextCommitments });
+                            setDirtyCoreFunding(true);
+                            if (commitmentsChanged) setDirtyCommitments(true);
+                            setSaveStatus("idle");
+                            if (openFundingErrors.length) setOpenFundingErrors([]);
+                          }}
+                          style={pillFieldStyle}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="kvKey">Milestone %</label>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={activeMilestone?.percent ?? 0}
+                          onChange={(e) => {
+                            if (editingMilestoneCommitmentIndex == null) return;
+                            const n = clampInt(Number(e.target.value), 0, 100);
+                            const current = project.funding.milestonePlan;
+                            if (!current) return;
+                            const nextMilestones = current.milestones.slice();
+                            nextMilestones[editingMilestoneCommitmentIndex] = {
+                              ...nextMilestones[editingMilestoneCommitmentIndex],
+                              percent: n,
+                            };
+                            setProject({ ...project, funding: { ...project.funding, milestonePlan: { ...current, milestones: nextMilestones } } });
+                            setDirtyCoreFunding(true);
+                            setSaveStatus("idle");
+                            if (openFundingErrors.length) setOpenFundingErrors([]);
+                          }}
+                          style={pillFieldStyle}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="splitGrid">
+                      <div>
+                        <label className="kvKey">Deliverable Type</label>
+                        <select
+                          value={milestoneCommitmentDraft.deliverableType}
+                          onChange={(e) =>
+                            setMilestoneCommitmentDraft({
+                              ...milestoneCommitmentDraft,
+                              deliverableType: e.target.value as CommitmentDraft["deliverableType"],
+                            })
+                          }
+                          style={{
+                            width: "100%",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            borderRadius: 999,
+                            padding: "10px 12px",
+                            color: "var(--text)",
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          <option value="">Select...</option>
+                          {DELIVERABLE_TYPES.map((t) => (
+                            <option key={t.value} value={t.value}>
+                              {t.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="kvKey">By when</label>
+                        <input
+                          type="date"
+                          value={milestoneCommitmentDraft.deadline}
+                          onChange={(e) => setMilestoneCommitmentDraft({ ...milestoneCommitmentDraft, deadline: e.target.value })}
+                          style={{
+                            width: "100%",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            borderRadius: 999,
+                            padding: "10px 12px",
+                            color: "var(--text)",
+                            fontFamily: "inherit",
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div style={{ height: 10 }} />
+
+                    <div className="splitGrid">
+                      <div>
+                        <label className="kvKey">Verification Method</label>
+                        <select
+                          value={milestoneCommitmentDraft.verificationMethod}
+                          onChange={(e) =>
+                            setMilestoneCommitmentDraft({
+                              ...milestoneCommitmentDraft,
+                              verificationMethod: e.target.value as CommitmentDraft["verificationMethod"],
+                            })
+                          }
+                          style={{
+                            width: "100%",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            borderRadius: 999,
+                            padding: "10px 12px",
+                            color: "var(--text)",
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          <option value="">Select...</option>
+                          {VERIFICATION_METHODS.map((m) => (
+                            <option key={m.value} value={m.value}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <div style={{ height: 10 }} />
+                    <div>
+                      <label className="kvKey">Verification Details (up to 150)</label>
+                      <input
+                        value={milestoneCommitmentDraft.verificationDetails}
+                        maxLength={150}
+                        onChange={(e) =>
+                          setMilestoneCommitmentDraft({
+                            ...milestoneCommitmentDraft,
+                            verificationDetails: e.target.value.slice(0, 150),
+                          })
+                        }
+                        style={{
+                          width: "100%",
+                          background: "transparent",
+                          border: "1px solid var(--border)",
+                          borderRadius: 999,
+                          padding: "10px 12px",
+                          color: "var(--text)",
+                          fontFamily: "inherit",
+                        }}
+                      />
+                    </div>
+                    <div style={{ height: 10 }} />
+
+                    <label className="kvKey">If it fails</label>
+                    <select
+                      value={milestoneCommitmentDraft.failureConsequence}
+                      onChange={(e) => {
+                        const next = e.target.value as CommitmentDraft["failureConsequence"];
+                        setMilestoneCommitmentDraft({
+                          ...milestoneCommitmentDraft,
+                          failureConsequence: next,
+                          refundPercent: next === "PARTIAL_REFUND" ? milestoneCommitmentDraft.refundPercent : "",
+                          voteDurationDays: next === "DEADLINE_EXTENSION_VOTE" ? milestoneCommitmentDraft.voteDurationDays : "",
+                        });
+                      }}
+                      style={{
+                        width: "100%",
+                        background: "transparent",
+                        border: "1px solid var(--border)",
+                        borderRadius: 999,
+                        padding: "10px 12px",
+                        color: "var(--text)",
+                        fontFamily: "inherit",
+                      }}
+                    >
+                      <option value="">Select...</option>
+                      {FAILURE_CONSEQUENCES.map((x) => (
+                        <option key={x.value} value={x.value}>
+                          {x.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    {milestoneCommitmentDraft.failureConsequence === "PARTIAL_REFUND" ? (
+                      <>
+                        <div style={{ height: 10 }} />
+                        <label className="kvKey">Refund percent (1-100)</label>
+                        <input
+                          inputMode="numeric"
+                          value={milestoneCommitmentDraft.refundPercent}
+                          onChange={(e) =>
+                            setMilestoneCommitmentDraft({ ...milestoneCommitmentDraft, refundPercent: e.target.value })
+                          }
+                          style={{
+                            width: "100%",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            borderRadius: 999,
+                            padding: "10px 12px",
+                            color: "var(--text)",
+                            fontFamily: "inherit",
+                          }}
+                        />
+                      </>
+                    ) : null}
+
+                    {milestoneCommitmentDraft.failureConsequence === "DEADLINE_EXTENSION_VOTE" ? (
+                      <>
+                        <div style={{ height: 10 }} />
+                        <label className="kvKey">Vote duration (days, optional)</label>
+                        <input
+                          inputMode="numeric"
+                          value={milestoneCommitmentDraft.voteDurationDays}
+                          onChange={(e) =>
+                            setMilestoneCommitmentDraft({ ...milestoneCommitmentDraft, voteDurationDays: e.target.value })
+                          }
+                          style={{
+                            width: "100%",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            borderRadius: 999,
+                            padding: "10px 12px",
+                            color: "var(--text)",
+                            fontFamily: "inherit",
+                          }}
+                        />
+                      </>
+                    ) : null}
+
+                    <div style={{ height: 10 }} />
+
+                    <label className="kvKey">Details (up to 150, no links)</label>
+                    <input
+                      value={milestoneCommitmentDraft.details}
+                      maxLength={150}
+                      onChange={(e) =>
+                        setMilestoneCommitmentDraft({ ...milestoneCommitmentDraft, details: e.target.value.slice(0, 150) })
+                      }
+                      style={{
+                        width: "100%",
+                        background: "transparent",
+                        border: "1px solid var(--border)",
+                        borderRadius: 999,
+                        padding: "10px 12px",
+                        color: "var(--text)",
+                        fontFamily: "inherit",
+                      }}
+                    />
+
+                    {milestoneCommitmentDraftErrors.length ? (
+                      <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+                        {milestoneCommitmentDraftErrors[0]}
+                      </div>
+                    ) : null}
+
+                    {duplicateMilestoneCommitmentWarning ? (
+                      <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                        {duplicateMilestoneCommitmentWarning}
+                      </div>
+                    ) : null}
+
+                    <div style={{ display: "flex", justifyContent: "flex-start", gap: 10, marginTop: 12 }}>
+                      <button
+                        type="button"
+                        className="ghostBtn"
+                        onClick={() => {
+                          setEditingMilestoneCommitmentIndex(null);
+                          setMilestoneCommitmentDraft(emptyCommitmentDraft());
+                        }}
+                      >
+                        Cancel
+                      </button>
+
+                      <button
+                        type="button"
+                        className="neutralBtn"
+                        disabled={saveStatus === "saving" || !milestoneCommitmentDraftValue}
+                        onClick={() => {
+                          if (editingMilestoneCommitmentIndex == null) return;
+                          if (!milestoneCommitmentDraftValue) return;
+                          const next = project.commitments.slice();
+                          const plan = project.funding.milestonePlan;
+                          if (!plan) return;
+                          const baseDeadline = project.funding.deadline ?? "";
+                          for (let i = next.length; i <= editingMilestoneCommitmentIndex && i < 5; i++) {
+                            next[i] = buildMilestoneCommitment(plan, i, baseDeadline);
+                          }
+                          next[editingMilestoneCommitmentIndex] = milestoneCommitmentDraftValue;
+                          setProject({ ...project, commitments: next });
+                          setDirtyCommitments(true);
+                          setSaveStatus("idle");
+                          if (openFundingErrors.length) setOpenFundingErrors([]);
+                          setMilestoneCommitmentDraft(emptyCommitmentDraft());
+                          setEditingMilestoneCommitmentIndex(null);
+                        }}
+                      >
+                        Save changes
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontWeight: 600, marginBottom: 10 }}>Preview</div>
+                    <div
+                      className="card"
+                      style={{
+                        background: "rgba(255,255,255,0.02)",
+                        border: "1px solid var(--border)",
+                        padding: 14,
+                      }}
+                    >
+                      <div className="muted num" style={{ fontSize: 12, marginBottom: 10 }}>
+                        This is how observers will read it.
+                      </div>
+
+                      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                        Deliverable
+                      </div>
+                      <div style={{ marginBottom: 10 }}>
+                        {labelFor(DELIVERABLE_TYPES, milestoneCommitmentDraft.deliverableType) || "-"}
+                        {milestoneCommitmentDraft.details.trim() ? ` - ${milestoneCommitmentDraft.details.trim()}` : ""}
+                      </div>
+
+                      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                        Deadline
+                      </div>
+                      <div className="num" style={{ marginBottom: 10 }}>
+                        {milestoneCommitmentDraft.deadline || "-"}
+                      </div>
+
+                      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                        Verification
+                      </div>
+                      <div style={{ marginBottom: 10 }}>
+                        {labelFor(VERIFICATION_METHODS, milestoneCommitmentDraft.verificationMethod) || "-"}
+                        {milestoneCommitmentDraft.verificationDetails.trim()
+                          ? ` - ${milestoneCommitmentDraft.verificationDetails.trim()}`
+                          : ""}
+                      </div>
+
+                      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                        If it fails
+                      </div>
+                      <div>
+                        {labelFor(FAILURE_CONSEQUENCES, milestoneCommitmentDraft.failureConsequence) || "-"}
+                        {milestoneCommitmentDraft.failureConsequence === "PARTIAL_REFUND" &&
+                        milestoneCommitmentDraft.refundPercent.trim()
+                          ? ` - ${milestoneCommitmentDraft.refundPercent.trim()}%`
+                          : ""}
+                        {milestoneCommitmentDraft.failureConsequence === "DEADLINE_EXTENSION_VOTE" &&
+                        milestoneCommitmentDraft.voteDurationDays.trim()
+                          ? ` - vote duration ${milestoneCommitmentDraft.voteDurationDays.trim()} days`
+                          : ""}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
+                  Select a milestone below to edit its commitment.
+                </div>
+              )}
+
+              <div style={{ height: 14 }} />
+
+              {(project.funding.milestonePlan?.milestones ?? []).length ? (
+                (project.funding.milestonePlan?.milestones ?? []).map((m, idx) => {
+                  const commitment =
+                    project.commitments[idx] ??
+                    buildMilestoneCommitment(project.funding.milestonePlan, idx, project.funding.deadline ?? "");
+                  return (
+                    <div
+                      key={`${m.name}-${idx}`}
+                      style={{
+                        borderTop: idx === 0 ? "1px solid var(--border)" : "1px solid var(--border)",
+                        paddingTop: 14,
+                        marginTop: 14,
+                      }}
+                    >
+                      <div className="muted num" style={{ fontSize: 12, marginBottom: 10 }}>
+                        Milestone {idx + 1} - {m.name} - {clampInt(Number(m.percent), 0, 100)}%
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <div>
+                          <span style={{ fontWeight: 600 }}>Deliverable:</span>{" "}
+                          {labelFor(DELIVERABLE_TYPES, commitment.deliverableType)} - {commitment.details}
+                        </div>
+                        <div className="num">
+                          <span style={{ fontWeight: 600 }}>Deadline:</span> {commitment.deadline}
+                        </div>
+                        <div>
+                          <span style={{ fontWeight: 600 }}>Verification:</span>{" "}
+                          {labelFor(VERIFICATION_METHODS, commitment.verificationMethod)} - {commitment.verificationDetails}
+                        </div>
+                        <div>
+                          <span style={{ fontWeight: 600 }}>If it fails:</span>{" "}
+                          {labelFor(FAILURE_CONSEQUENCES, commitment.failureConsequence)}
+                          {commitment.failureConsequence === "PARTIAL_REFUND" && commitment.refundPercent != null
+                            ? ` - ${commitment.refundPercent}%`
+                            : ""}
+                          {commitment.failureConsequence === "DEADLINE_EXTENSION_VOTE" && commitment.voteDurationDays != null
+                            ? ` - vote duration ${commitment.voteDurationDays} days`
+                            : ""}
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 }}>
+                        <button
+                          type="button"
+                          className="ghostBtn"
+                          onClick={() => {
+                            setEditingMilestoneCommitmentIndex(idx);
+                            setMilestoneCommitmentDraft(commitmentToDraft(commitment));
+                          }}
+                        >
+                          Edit
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="muted">No milestone commitments yet.</p>
+              )}
+            </div>
+          ) : null}
+
           <div
             className="card"
             style={{
@@ -1899,7 +2468,9 @@ export default function DraftEditorClient({ id }: Props) {
                 <span>150 chars max in Details.</span>
               </div>
               <div className="num">
-                {project.commitments.length}/5
+                {milestoneCount
+                  ? `${extraCommitments.length}/${maxExtraCommitments}`
+                  : `${project.commitments.length}/5`}
               </div>
             </div>
 
@@ -1926,10 +2497,10 @@ export default function DraftEditorClient({ id }: Props) {
               </div>
             ) : null}
 
-            <div className="splitGrid" style={{ gridTemplateColumns: "1fr 1fr", alignItems: "start" }}>
+            <div className="splitGrid" style={{ alignItems: "start" }}>
               <div>
                 <div style={{ fontWeight: 600, marginBottom: 10 }}>
-                  Commitment Builder
+                  {milestoneCount ? "Additional Commitment Builder" : "Commitment Builder"}
                   {editingCommitmentIndex != null ? (
                     <span className="muted num" style={{ marginLeft: 8, fontWeight: 400 }}>
                       (editing #{editingCommitmentIndex + 1})
@@ -1937,7 +2508,7 @@ export default function DraftEditorClient({ id }: Props) {
                   ) : null}
                 </div>
 
-                <div className="splitGrid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                <div className="splitGrid">
                   <div>
                     <label className="kvKey">Deliverable Type</label>
                     <select
@@ -1985,7 +2556,7 @@ export default function DraftEditorClient({ id }: Props) {
 
                 <div style={{ height: 10 }} />
 
-                <div className="splitGrid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+                <div className="splitGrid">
                   <div>
                     <label className="kvKey">Verification Method</label>
                     <select
@@ -2159,14 +2730,16 @@ export default function DraftEditorClient({ id }: Props) {
                     disabled={
                       saveStatus === "saving" ||
                       !commitmentDraftValue ||
-                      (editingCommitmentIndex == null && project.commitments.length >= 5)
+                      (editingCommitmentIndex == null &&
+                        (project.commitments.length >= 5 || extraCommitments.length >= maxExtraCommitments))
                     }
                     onClick={() => {
                       if (!commitmentDraftValue) return;
 
                       if (editingCommitmentIndex != null) {
+                        const actualIndex = milestoneCount + editingCommitmentIndex;
                         const next = project.commitments.slice();
-                        next[editingCommitmentIndex] = commitmentDraftValue;
+                        next[actualIndex] = commitmentDraftValue;
                         setProject({ ...project, commitments: next });
                         setEditingCommitmentIndex(null);
                       } else {
@@ -2179,7 +2752,11 @@ export default function DraftEditorClient({ id }: Props) {
                       setCommitmentDraft(emptyCommitmentDraft());
                     }}
                   >
-                    {editingCommitmentIndex != null ? "Save changes" : "Add commitment"}
+                    {editingCommitmentIndex != null
+                      ? "Save changes"
+                      : milestoneCount
+                        ? "Add additional commitment"
+                        : "Add commitment"}
                   </button>
                 </div>
               </div>
@@ -2239,8 +2816,8 @@ export default function DraftEditorClient({ id }: Props) {
 
             <div style={{ height: 14 }} />
 
-            {project.commitments.length ? (
-              project.commitments.map((c, idx) => (
+            {extraCommitments.length ? (
+              extraCommitments.map((c, idx) => (
                 <div
                   key={`${c.deliverableType}-${c.deadline}-${idx}`}
                   style={{
@@ -2250,7 +2827,7 @@ export default function DraftEditorClient({ id }: Props) {
                   }}
                 >
                   <div className="muted num" style={{ fontSize: 12, marginBottom: 10 }}>
-                    Commitment {idx + 1}
+                    {milestoneCount ? `Additional commitment ${idx + 1}` : `Commitment ${idx + 1}`}
                   </div>
 
                   <div style={{ display: "grid", gap: 6 }}>
@@ -2281,16 +2858,7 @@ export default function DraftEditorClient({ id }: Props) {
                       className="ghostBtn"
                       onClick={() => {
                         setEditingCommitmentIndex(idx);
-                        setCommitmentDraft({
-                          deliverableType: c.deliverableType,
-                          deadline: c.deadline,
-                          verificationMethod: c.verificationMethod,
-                          verificationDetails: c.verificationDetails,
-                          failureConsequence: c.failureConsequence,
-                          refundPercent: c.refundPercent != null ? String(c.refundPercent) : "",
-                          voteDurationDays: c.voteDurationDays != null ? String(c.voteDurationDays) : "",
-                          details: c.details,
-                        });
+                        setCommitmentDraft(commitmentToDraft(c));
                       }}
                     >
                       Edit
@@ -2300,8 +2868,9 @@ export default function DraftEditorClient({ id }: Props) {
                       type="button"
                       className="ghostBtn"
                       onClick={() => {
+                        const actualIndex = milestoneCount + idx;
                         const next = project.commitments.slice();
-                        next.splice(idx, 1);
+                        next.splice(actualIndex, 1);
                         setProject({ ...project, commitments: next });
                         setDirtyCommitments(true);
                         setSaveStatus("idle");
@@ -2318,7 +2887,7 @@ export default function DraftEditorClient({ id }: Props) {
                 </div>
               ))
             ) : (
-              <p className="muted">No commitments yet.</p>
+              <p className="muted">{milestoneCount ? "No additional commitments yet." : "No commitments yet."}</p>
             )}
 
             <div
@@ -2413,6 +2982,14 @@ export default function DraftEditorClient({ id }: Props) {
           </section>
         ) : null}
       </div>
+      <AppModal
+        open={!!modal}
+        title={modal?.title}
+        onClose={modal?.onClose}
+        actions={modal?.actions ?? []}
+      >
+        <p style={{ whiteSpace: "pre-line" }}>{modal?.message ?? ""}</p>
+      </AppModal>
     </main>
   );
 }

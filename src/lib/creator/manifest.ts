@@ -26,6 +26,15 @@ export type ProjectManifestV1 = {
     minimumAllocation: string;
     deadline: string;
     releaseModel: string;
+    milestonePlan:
+      | {
+          initialPercent: number;
+          milestones: Array<{
+            name: string;
+            percent: number;
+          }>;
+        }
+      | null;
     projectURI: string | null;
     stampURI: string | null;
     contractAddress: string | null;
@@ -83,6 +92,15 @@ export function buildProjectManifest(project: ProjectRecord): ProjectManifestV1 
   const minimumAllocation = cleanText(project.funding.minimumAllocation) ?? "";
   const deadline = cleanText(project.funding.deadline) ?? "";
   const releaseModel = cleanText(project.funding.releaseModel) ?? "";
+  const milestonePlan = project.funding.milestonePlan
+    ? {
+        initialPercent: Number(project.funding.milestonePlan.initialPercent ?? 0),
+        milestones: (project.funding.milestonePlan.milestones ?? []).map((m, idx) => ({
+          name: cleanText(m.name) ?? `Milestone ${idx + 1}`,
+          percent: Number(m.percent ?? 0),
+        })),
+      }
+    : null;
   const projectURI = cleanText(project.funding.projectURI);
   const stampURI = cleanText(project.funding.stampURI);
 
@@ -115,6 +133,7 @@ export function buildProjectManifest(project: ProjectRecord): ProjectManifestV1 
       minimumAllocation,
       deadline,
       releaseModel,
+      milestonePlan,
       projectURI,
       stampURI,
       contractAddress: project.funding.contractAddress ?? null,

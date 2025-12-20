@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import AppModal from "@/components/AppModal";
 
 type Overview = {
   wallet: string;
@@ -52,6 +53,7 @@ export default function CreatorConsoleClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; title: string } | null>(null);
 
   async function load() {
     setLoading(true);
@@ -107,8 +109,6 @@ export default function CreatorConsoleClient() {
   }
 
   async function deleteDraft(id: string) {
-    const ok = window.confirm("Delete this draft?\n\nThis cannot be undone.");
-    if (!ok) return;
     const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (res.ok) await load();
   }
@@ -222,7 +222,7 @@ export default function CreatorConsoleClient() {
         <section className="section">
           <h2>Drafts ({overview.drafts.length})</h2>
           {overview.drafts.length ? (
-            <table className="dataTable">
+            <table className="dataTable stackTable">
               <thead>
                 <tr>
                   <th>Title</th>
@@ -234,23 +234,31 @@ export default function CreatorConsoleClient() {
               <tbody>
                 {overview.drafts.map((d) => (
                   <tr key={d.id}>
-                    <td>
+                    <td data-label="Title">
                       <span className="projectTitle">{d.title?.trim() || "Untitled draft"}</span>
                       <span className="projectCat num">{d.id.slice(0, 8)}</span>
                     </td>
-                    <td className="num">{formatWhen(d.updatedAt)}</td>
-                    <td className="muted">
+                    <td className="num" data-label="Updated">
+                      {formatWhen(d.updatedAt)}
+                    </td>
+                    <td className="muted" data-label="Completion">
                       {d.readiness === "READY" ? "Ready to publish" : "Structure incomplete"}
                     </td>
-                    <td className="rightAlign">
-                      <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <td className="rightAlign" data-label="Actions">
+                      <div className="actionStack">
                         <Link className="ghostBtn" href={`/creator/drafts/${encodeURIComponent(d.id)}`}>
                           Edit
                         </Link>
                         <Link className="ghostBtn" href={`/creator/projects/${encodeURIComponent(d.id)}`}>
                           View record
                         </Link>
-                        <button type="button" className="ghostBtn" onClick={() => deleteDraft(d.id)}>
+                        <button
+                          type="button"
+                          className="ghostBtn"
+                          onClick={() =>
+                            setConfirmDelete({ id: d.id, title: d.title?.trim() || "Untitled draft" })
+                          }
+                        >
                           Delete
                         </button>
                       </div>
@@ -275,7 +283,7 @@ export default function CreatorConsoleClient() {
         <section className="section">
           <h2>Active ({overview.active.length})</h2>
           {overview.active.length ? (
-            <table className="dataTable">
+            <table className="dataTable stackTable">
               <thead>
                 <tr>
                   <th>Title</th>
@@ -288,12 +296,18 @@ export default function CreatorConsoleClient() {
               <tbody>
                 {overview.active.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.title?.trim() || "Untitled project"}</td>
-                    <td className="num">{p.raised} / {p.target}</td>
-                    <td className="num">{p.deadline ? formatWhen(p.deadline) : "—"}</td>
-                    <td className="num">{p.contract ? shortAddress(p.contract) : "—"}</td>
-                    <td className="rightAlign">
-                      <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <td data-label="Title">{p.title?.trim() || "Untitled project"}</td>
+                    <td className="num" data-label="Raised / Target">
+                      {p.raised} / {p.target}
+                    </td>
+                    <td className="num" data-label="Time remaining">
+                      {p.deadline ? formatWhen(p.deadline) : "—"}
+                    </td>
+                    <td className="num" data-label="Contract">
+                      {p.contract ? shortAddress(p.contract) : "—"}
+                    </td>
+                    <td className="rightAlign" data-label="Actions">
+                      <div className="actionStack">
                         <Link className="ghostBtn" href={`/creator/projects/${encodeURIComponent(p.id)}`}>
                           View record
                         </Link>
@@ -316,7 +330,7 @@ export default function CreatorConsoleClient() {
         <section className="section">
           <h2>Archive</h2>
           {overview.archive.length ? (
-            <table className="dataTable">
+            <table className="dataTable stackTable">
               <thead>
                 <tr>
                   <th>Title</th>
@@ -328,14 +342,16 @@ export default function CreatorConsoleClient() {
               <tbody>
                 {overview.archive.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.title?.trim() || "Untitled project"}</td>
-                    <td>
+                    <td data-label="Title">{p.title?.trim() || "Untitled project"}</td>
+                    <td data-label="Final outcome">
                       <span className={`badge ${p.outcome === "COMPLETED" ? "badgeCompleted" : "badgeFailed"}`}>
                         {p.outcome}
                       </span>
                     </td>
-                    <td className="num">{formatWhen(p.closedAt)}</td>
-                    <td className="rightAlign">
+                    <td className="num" data-label="Closed">
+                      {formatWhen(p.closedAt)}
+                    </td>
+                    <td className="rightAlign" data-label="Actions">
                       <Link className="ghostBtn" href={`/creator/projects/${encodeURIComponent(p.id)}`}>
                         View record
                       </Link>
@@ -351,6 +367,31 @@ export default function CreatorConsoleClient() {
             </div>
           )}
         </section>
+        <AppModal
+          open={!!confirmDelete}
+          title="// CONFIRM DELETE"
+          onClose={() => setConfirmDelete(null)}
+          actions={[
+            {
+              label: "Cancel",
+              variant: "ghost",
+              onClick: () => setConfirmDelete(null),
+            },
+            {
+              label: "Delete",
+              variant: "neutral",
+              onClick: () => {
+                if (!confirmDelete) return;
+                void deleteDraft(confirmDelete.id);
+                setConfirmDelete(null);
+              },
+            },
+          ]}
+        >
+          <p style={{ whiteSpace: "pre-line" }}>
+            {`Delete "${confirmDelete?.title ?? "Untitled draft"}"?\n\nThis cannot be undone.`}
+          </p>
+        </AppModal>
       </div>
     </main>
   );

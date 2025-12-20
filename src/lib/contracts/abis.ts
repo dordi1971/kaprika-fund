@@ -8,6 +8,46 @@ export const KaprikaProjectFactoryAbi = [
     inputs: [],
     outputs: [{ type: "uint256" }],
   },
+    // ERC-1155 views (needed for Desk)
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "lockedBlue",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+
+  // Governance views (needed for Desk notifications)
+  { type: "function", name: "nextProposalId", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  {
+    type: "function",
+    name: "proposals",
+    stateMutability: "view",
+    inputs: [{ name: "proposalId", type: "uint256" }],
+    outputs: [
+      { name: "kind", type: "uint8" },
+      { name: "trancheIndex", type: "uint8" },
+      { name: "to", type: "address" },
+      { name: "startTime", type: "uint64" },
+      { name: "endTime", type: "uint64" },
+      { name: "forVotes", type: "uint256" },
+      { name: "againstVotes", type: "uint256" },
+      { name: "executed", type: "bool" },
+      { name: "paramKey", type: "uint8" },
+      { name: "paramValue", type: "uint256" },
+    ],
+  },
+
   {
     type: "function",
     name: "createProject",
@@ -39,6 +79,13 @@ export const KaprikaProjectFactoryAbi = [
     stateMutability: "view",
     inputs: [{ name: "projectId", type: "uint256" }],
     outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "nextProjectId",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
   },
   {
     type: "event",
