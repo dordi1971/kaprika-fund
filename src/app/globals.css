@@ -209,11 +209,6 @@ a {
   justify-content: flex-end;
 }
 
-.topBarUtilityGroup {
-  gap: 10px;
-  align-items: center;
-}
-
 .desktopOnly {
   display: flex;
 }
@@ -1061,19 +1056,22 @@ p {
 .modalOverlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0);
+  background: rgba(0, 0, 0, 0.82);
   backdrop-filter: blur(2px);
   display: grid;
   place-items: center;
   padding: 18px;
-  z-index: -1000;
+  z-index: 1000;
 }
+
 
 .helpOverlay {
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
   padding: 96px 24px 24px;
+  background: rgba(0, 0, 0, 0);
+  z-index: -950;
 }
 
 .helpPanel {
@@ -1137,21 +1135,6 @@ p {
 .drawerBody {
   padding: 12px 12px;
   overflow: auto;
-}
-
-.drawerActions {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.drawerActions .neutralBtn {
-  width: 100%;
-}
-
-.drawerActions .themeToggle {
-  width: 100%;
-  text-align: center;
 }
 
 .drawerLink {
